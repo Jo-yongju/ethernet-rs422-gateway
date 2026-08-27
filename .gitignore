@@ -1,0 +1,27 @@
+# STM32CubeIDE build output
+**/Debug/
+**/Release/
+/build/
+**/.metadata/
+
+# Compiler and linker output
+*.o
+*.d
+*.su
+*.cyclo
+*.map
+*.elf
+*.bin
+*.hex
+*.list
+*.exe
+
+# Runtime and test output
+*.log
+*.tmp
+/tcp_rtt.csv
+/udp_loss.csv
+
+# Operating-system metadata
+.DS_Store
+Thumbs.db
