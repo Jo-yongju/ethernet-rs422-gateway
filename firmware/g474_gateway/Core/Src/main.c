@@ -65,6 +65,14 @@ typedef enum
 #define UDP_TELEMETRY_QUEUE_DEPTH          4u
 #define HEALTH_TASK_PERIOD_MS              100u
 #define RS422_COMM_TIMEOUT_MS              1500u
+#define W5500_RESET_DELAY_MS               2u
+#define W5500_SPI_TIMEOUT_MS               100u
+#define W5500_VERSIONR_ADDRESS             0x0039u
+#define W5500_PHYCFGR_ADDRESS              0x002eu
+#define W5500_PHYCFGR_LNK                  0x01u
+#define W5500_PHY_POLL_PERIOD_MS           100u
+/* BSB[4:0] = 00000 (Common), RWB = 0 (Read), OM[1:0] = 00 (VDM). */
+#define W5500_COMMON_READ_VDM              0x00u
 
 /* USER CODE END PD */
 
@@ -129,6 +137,13 @@ static volatile uint32_t g_rs422_comm_recovery_count = 0u;
 static volatile uint32_t g_gateway_queue_init_ok = 0u;
 static volatile uint32_t g_gateway_free_heap_bytes = 0u;
 static volatile uint32_t g_gateway_min_ever_free_heap_bytes = 0u;
+static volatile uint8_t g_w5500_version = 0u;
+/* -1: not completed; otherwise HAL_OK/ERROR/BUSY/TIMEOUT = 0/1/2/3. */
+static volatile int32_t g_w5500_spi_status = -1;
+/* Retain the last successful PHY sample on error; always check PHY SPI status. */
+static volatile uint8_t g_w5500_phycfgr = 0u;
+static volatile uint32_t g_w5500_link_up = 0u;
+static volatile int32_t g_w5500_phy_spi_status = -1;
 static osMessageQueueId_t rs422_cmd_queue = NULL;
 static osMessageQueueId_t tcp_response_queue = NULL;
 static osMessageQueueId_t udp_telemetry_queue = NULL;
@@ -175,11 +190,57 @@ static int32_t rs422_wait_for_tx_complete(
   uint32_t *matching_pong_received);
 static int32_t rs422_ping_bringup_test(uint16_t sequence);
 static int32_t rs422_ping_bringup_run(void);
+static void w5500_hardware_reset(void);
+static HAL_StatusTypeDef w5500_read_version(uint8_t *version);
+static HAL_StatusTypeDef w5500_read_common_register(uint16_t address, uint8_t *value);
 
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
+static void w5500_hardware_reset(void)
+{
+  /* Add one tick so tick phase cannot shorten either delay below 2 ms.
+     Reset low must be >= 500 us; PLL lock takes at most 1 ms after release. */
+  const uint32_t delay_ticks = (uint32_t)(
+    (((uint64_t)W5500_RESET_DELAY_MS * osKernelGetTickFreq()) + 999u) / 1000u) + 1u;
+
+  HAL_GPIO_WritePin(W5500_CS_GPIO_Port, W5500_CS_Pin, GPIO_PIN_SET);
+  HAL_GPIO_WritePin(W5500_RST_GPIO_Port, W5500_RST_Pin, GPIO_PIN_RESET);
+  (void)osDelay(delay_ticks);
+  HAL_GPIO_WritePin(W5500_RST_GPIO_Port, W5500_RST_Pin, GPIO_PIN_SET);
+  (void)osDelay(delay_ticks);
+}
+
+static HAL_StatusTypeDef w5500_read_version(uint8_t *version)
+{
+  return w5500_read_common_register(W5500_VERSIONR_ADDRESS, version);
+}
+
+static HAL_StatusTypeDef w5500_read_common_register(uint16_t address, uint8_t *value)
+{
+  const uint8_t tx[4] = {
+    (uint8_t)(address >> 8),
+    (uint8_t)(address & 0xffu),
+    W5500_COMMON_READ_VDM,
+    0u /* Dummy byte clocks the register data out on MISO. */
+  };
+  uint8_t rx[4] = {0u};
+
+  /* Keep CS low for address, control and data in one full-duplex transfer. */
+  HAL_GPIO_WritePin(W5500_CS_GPIO_Port, W5500_CS_Pin, GPIO_PIN_RESET);
+  const HAL_StatusTypeDef status = HAL_SPI_TransmitReceive(
+    &hspi2, tx, rx, (uint16_t)sizeof(tx), W5500_SPI_TIMEOUT_MS);
+  HAL_GPIO_WritePin(W5500_CS_GPIO_Port, W5500_CS_Pin, GPIO_PIN_SET);
+
+  if (status == HAL_OK)
+  {
+    *value = rx[3];
+  }
+
+  return status;
+}
+
 static void rs422_rx_ring_push_from_isr(uint8_t byte)
 {
   const uint16_t head = g_rs422_rx_head;
@@ -959,10 +1020,38 @@ void StartRS422Task(void *argument)
 void StartEthernetTask(void *argument)
 {
   /* USER CODE BEGIN StartEthernetTask */
+  uint8_t version = 0u;
+
+  w5500_hardware_reset();
+  const HAL_StatusTypeDef status = w5500_read_version(&version);
+  g_w5500_version = version;
+  g_w5500_spi_status = (int32_t)status;
+
+  const uint32_t phy_period_ticks =
+    rs422_ms_to_kernel_ticks(W5500_PHY_POLL_PERIOD_MS);
+  uint32_t next_phy_tick = osKernelGetTickCount();
+
   /* Infinite loop */
   for(;;)
   {
-    osDelay(1);
+    uint8_t phycfgr = 0u;
+    const HAL_StatusTypeDef phy_status = w5500_read_common_register(
+      W5500_PHYCFGR_ADDRESS, &phycfgr);
+
+    if (phy_status == HAL_OK)
+    {
+      g_w5500_phycfgr = phycfgr;
+      g_w5500_link_up = ((phycfgr & W5500_PHYCFGR_LNK) != 0u) ? 1u : 0u;
+    }
+    g_w5500_phy_spi_status = (int32_t)phy_status;
+
+    next_phy_tick += phy_period_ticks;
+    if (osDelayUntil(next_phy_tick) != osOK)
+    {
+      /* A slow/failed SPI read may miss the deadline. Block before retrying. */
+      (void)osDelay(phy_period_ticks);
+      next_phy_tick = osKernelGetTickCount();
+    }
   }
   /* USER CODE END StartEthernetTask */
 }
