@@ -18,9 +18,11 @@
 /* USER CODE END Header */
 /* Includes ------------------------------------------------------------------*/
 #include "main.h"
+#include "cmsis_os.h"
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
+#include "FreeRTOS.h"
 #include "protocol.h"
 #include "stream_parser.h"
 
@@ -38,15 +40,31 @@ typedef enum
   RS422_PING_TEST_RX_FAILURE = -4
 } rs422_ping_test_result_t;
 
+typedef enum
+{
+  COMM_INIT = 0,
+  COMM_OK,
+  COMM_TIMEOUT
+} rs422_comm_state_t;
+
 /* USER CODE END PTD */
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
 #define RS422_BRINGUP_TEST_COUNT          100u
 #define RS422_BRINGUP_TX_TIMEOUT_MS       100u
-#define RS422_BRINGUP_RX_BYTE_TIMEOUT_MS  10u
 #define RS422_BRINGUP_PONG_TIMEOUT_MS     1000u
 #define RS422_BRINGUP_INTER_TEST_DELAY_MS 20u
+#define RS422_EVENT_RX                     (1UL << 0)
+#define RS422_EVENT_TX_DONE                (1UL << 1)
+#define RS422_EVENT_MASK                   (RS422_EVENT_RX | RS422_EVENT_TX_DONE)
+#define RS422_RX_RING_CAPACITY             512u
+#define RS422_RX_RING_MASK                 (RS422_RX_RING_CAPACITY - 1u)
+#define RS422_CMD_QUEUE_DEPTH              8u
+#define TCP_RESPONSE_QUEUE_DEPTH           8u
+#define UDP_TELEMETRY_QUEUE_DEPTH          4u
+#define HEALTH_TASK_PERIOD_MS              100u
+#define RS422_COMM_TIMEOUT_MS              1500u
 
 /* USER CODE END PD */
 
@@ -60,6 +78,34 @@ SPI_HandleTypeDef hspi2;
 
 UART_HandleTypeDef huart4;
 
+/* Definitions for defaultTask */
+osThreadId_t defaultTaskHandle;
+const osThreadAttr_t defaultTask_attributes = {
+  .name = "defaultTask",
+  .priority = (osPriority_t) osPriorityNormal,
+  .stack_size = 128 * 4
+};
+/* Definitions for RS422Task */
+osThreadId_t RS422TaskHandle;
+const osThreadAttr_t RS422Task_attributes = {
+  .name = "RS422Task",
+  .priority = (osPriority_t) osPriorityHigh,
+  .stack_size = 512 * 4
+};
+/* Definitions for EthernetTask */
+osThreadId_t EthernetTaskHandle;
+const osThreadAttr_t EthernetTask_attributes = {
+  .name = "EthernetTask",
+  .priority = (osPriority_t) osPriorityNormal,
+  .stack_size = 512 * 4
+};
+/* Definitions for HealthTask */
+osThreadId_t HealthTaskHandle;
+const osThreadAttr_t HealthTask_attributes = {
+  .name = "HealthTask",
+  .priority = (osPriority_t) osPriorityLow,
+  .stack_size = 128 * 4
+};
 /* USER CODE BEGIN PV */
 static volatile int32_t g_rs422_ping_test_result = RS422_PING_TEST_NOT_RUN;
 static volatile uint8_t g_rs422_last_msg_id = 0u;
@@ -68,10 +114,41 @@ static volatile uint32_t g_rs422_rx_frame_count = 0u;
 static volatile uint32_t g_rs422_test_total = 0u;
 static volatile uint32_t g_rs422_test_success = 0u;
 static volatile uint32_t g_rs422_test_fail = 0u;
+static volatile uint32_t g_rs422_rx_overflow_count = 0u;
+static volatile uint32_t g_rs422_uart_rx_error_count = 0u;
+static volatile uint32_t g_rs422_tx_busy = 0u;
+static volatile uint32_t g_rs422_tx_complete_count = 0u;
+static volatile uint32_t g_rs422_tx_busy_count = 0u;
+static volatile uint32_t g_rs422_tx_error_count = 0u;
+static volatile uint32_t g_rs422_tx_timeout_count = 0u;
+static volatile uint32_t g_rs422_last_valid_frame_tick = 0u;
+static volatile uint32_t g_rs422_has_valid_frame = 0u;
+static volatile rs422_comm_state_t g_rs422_comm_state = COMM_INIT;
+static volatile uint32_t g_rs422_comm_timeout_count = 0u;
+static volatile uint32_t g_rs422_comm_recovery_count = 0u;
+static volatile uint32_t g_gateway_queue_init_ok = 0u;
+static volatile uint32_t g_gateway_free_heap_bytes = 0u;
+static volatile uint32_t g_gateway_min_ever_free_heap_bytes = 0u;
+static osMessageQueueId_t rs422_cmd_queue = NULL;
+static osMessageQueueId_t tcp_response_queue = NULL;
+static osMessageQueueId_t udp_telemetry_queue = NULL;
+static const osMessageQueueAttr_t rs422_cmd_queue_attributes = {
+  .name = "rs422_cmd_queue"
+};
+static const osMessageQueueAttr_t tcp_response_queue_attributes = {
+  .name = "tcp_response_queue"
+};
+static const osMessageQueueAttr_t udp_telemetry_queue_attributes = {
+  .name = "udp_telemetry_queue"
+};
 static protocol_packet_t g_rs422_ping_packet;
 static protocol_packet_t g_rs422_received_packet;
 static stream_parser_t g_rs422_parser;
 static uint8_t g_rs422_tx_frame[PROTOCOL_MAX_FRAME_SIZE];
+static uint8_t g_uart4_rx_byte;
+static uint8_t g_rs422_rx_ring[RS422_RX_RING_CAPACITY];
+static volatile uint16_t g_rs422_rx_head = 0u;
+static volatile uint16_t g_rs422_rx_tail = 0u;
 
 /* USER CODE END PV */
 
@@ -80,7 +157,22 @@ void SystemClock_Config(void);
 static void MX_GPIO_Init(void);
 static void MX_SPI2_Init(void);
 static void MX_UART4_Init(void);
+void StartDefaultTask(void *argument);
+void StartRS422Task(void *argument);
+void StartEthernetTask(void *argument);
+void StartHealthTask(void *argument);
+
 /* USER CODE BEGIN PFP */
+static void rs422_rx_ring_push_from_isr(uint8_t byte);
+static uint32_t rs422_rx_ring_pop(uint8_t *byte);
+static uint32_t rs422_ms_to_kernel_ticks(uint32_t time_ms);
+static uint32_t rs422_process_rx_buffer(
+  uint16_t expected_pong_sequence,
+  uint32_t match_pong);
+static void rs422_handle_tx_done_event(uint32_t flags);
+static int32_t rs422_wait_for_tx_complete(
+  uint16_t expected_pong_sequence,
+  uint32_t *matching_pong_received);
 static int32_t rs422_ping_bringup_test(uint16_t sequence);
 static int32_t rs422_ping_bringup_run(void);
 
@@ -88,13 +180,186 @@ static int32_t rs422_ping_bringup_run(void);
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
+static void rs422_rx_ring_push_from_isr(uint8_t byte)
+{
+  const uint16_t head = g_rs422_rx_head;
+  const uint16_t tail = g_rs422_rx_tail;
+
+  if ((uint16_t)(head - tail) >= RS422_RX_RING_CAPACITY)
+  {
+    g_rs422_rx_overflow_count++;
+    return;
+  }
+
+  g_rs422_rx_ring[head & RS422_RX_RING_MASK] = byte;
+  __DMB();
+  g_rs422_rx_head = (uint16_t)(head + 1u);
+}
+
+static uint32_t rs422_rx_ring_pop(uint8_t *byte)
+{
+  const uint16_t tail = g_rs422_rx_tail;
+
+  if (tail == g_rs422_rx_head)
+  {
+    return 0u;
+  }
+
+  __DMB();
+  *byte = g_rs422_rx_ring[tail & RS422_RX_RING_MASK];
+  __DMB();
+  g_rs422_rx_tail = (uint16_t)(tail + 1u);
+  return 1u;
+}
+
+static uint32_t rs422_ms_to_kernel_ticks(uint32_t time_ms)
+{
+  const uint32_t tick_frequency = osKernelGetTickFreq();
+  uint32_t ticks = (uint32_t)((((uint64_t)time_ms * tick_frequency) + 999u) /
+                              1000u);
+
+  if (ticks == 0u)
+  {
+    ticks = 1u;
+  }
+
+  return ticks;
+}
+
+static uint32_t rs422_process_rx_buffer(
+  uint16_t expected_pong_sequence,
+  uint32_t match_pong)
+{
+  uint8_t rx_byte;
+  uint32_t matching_pong_received = 0u;
+
+  while (rs422_rx_ring_pop(&rx_byte) != 0u)
+  {
+    const stream_parser_event_t parser_event = stream_parser_feed_byte(
+      &g_rs422_parser,
+      rx_byte,
+      &g_rs422_received_packet);
+
+    if (parser_event == STREAM_EVENT_FRAME)
+    {
+      g_rs422_rx_frame_count++;
+      g_rs422_last_msg_id = g_rs422_received_packet.msg_id;
+      g_rs422_last_valid_frame_tick = osKernelGetTickCount();
+      __DMB();
+      g_rs422_has_valid_frame = 1u;
+
+      if ((match_pong != 0u) &&
+          (g_rs422_received_packet.msg_id == MSG_PONG) &&
+          (g_rs422_received_packet.seq == expected_pong_sequence))
+      {
+        matching_pong_received = 1u;
+      }
+    }
+  }
+
+  return matching_pong_received;
+}
+
+static void rs422_handle_tx_done_event(uint32_t flags)
+{
+  if ((flags & RS422_EVENT_TX_DONE) != 0u)
+  {
+    if (g_rs422_tx_busy != 0u)
+    {
+      g_rs422_tx_busy = 0u;
+      g_rs422_tx_complete_count++;
+    }
+    else
+    {
+      g_rs422_tx_error_count++;
+    }
+  }
+}
+
+static int32_t rs422_wait_for_tx_complete(
+  uint16_t expected_pong_sequence,
+  uint32_t *matching_pong_received)
+{
+  const uint32_t timeout_ticks =
+    rs422_ms_to_kernel_ticks(RS422_BRINGUP_TX_TIMEOUT_MS);
+  const uint32_t wait_start_ticks = osKernelGetTickCount();
+
+  *matching_pong_received = 0u;
+
+  while (g_rs422_tx_busy != 0u)
+  {
+    *matching_pong_received |=
+      rs422_process_rx_buffer(expected_pong_sequence, 1u);
+
+    const uint32_t pending_flags = osThreadFlagsWait(
+      RS422_EVENT_MASK,
+      osFlagsWaitAny,
+      0u);
+
+    if ((pending_flags & osFlagsError) == 0u)
+    {
+      rs422_handle_tx_done_event(pending_flags);
+    }
+    else if (pending_flags != osFlagsErrorResource)
+    {
+      g_rs422_tx_error_count++;
+      return RS422_PING_TEST_TX_FAILURE;
+    }
+
+    if (g_rs422_tx_busy == 0u)
+    {
+      *matching_pong_received |=
+        rs422_process_rx_buffer(expected_pong_sequence, 1u);
+      return RS422_PING_TEST_PASS;
+    }
+
+    const uint32_t elapsed_ticks =
+      (uint32_t)(osKernelGetTickCount() - wait_start_ticks);
+
+    if (elapsed_ticks >= timeout_ticks)
+    {
+      g_rs422_tx_timeout_count++;
+      return RS422_PING_TEST_TX_FAILURE;
+    }
+
+    const uint32_t flags = osThreadFlagsWait(
+      RS422_EVENT_MASK,
+      osFlagsWaitAny,
+      timeout_ticks - elapsed_ticks);
+
+    if (flags == osFlagsErrorTimeout)
+    {
+      g_rs422_tx_timeout_count++;
+      return RS422_PING_TEST_TX_FAILURE;
+    }
+
+    if ((flags & osFlagsError) != 0u)
+    {
+      g_rs422_tx_error_count++;
+      return RS422_PING_TEST_TX_FAILURE;
+    }
+
+    rs422_handle_tx_done_event(flags);
+  }
+
+  return RS422_PING_TEST_PASS;
+}
+
 static int32_t rs422_ping_bringup_test(uint16_t sequence)
 {
+  HAL_StatusTypeDef tx_status;
   size_t tx_frame_length = 0u;
-  uint8_t rx_byte = 0u;
-  uint32_t wait_start_ms;
+  uint32_t matching_pong_received = 0u;
+  uint32_t wait_start_ticks;
+  uint32_t pong_timeout_ticks;
 
   g_rs422_last_seq = sequence;
+
+  if (g_rs422_tx_busy != 0u)
+  {
+    g_rs422_tx_busy_count++;
+    return RS422_PING_TEST_TX_FAILURE;
+  }
 
   g_rs422_ping_packet.version = PROTOCOL_VERSION;
   g_rs422_ping_packet.msg_id = MSG_PING;
@@ -110,61 +375,83 @@ static int32_t rs422_ping_bringup_test(uint16_t sequence)
     return RS422_PING_TEST_ENCODE_FAILURE;
   }
 
-  stream_parser_init(&g_rs422_parser);
+  if ((osThreadFlagsClear(RS422_EVENT_TX_DONE) & osFlagsError) != 0u)
+  {
+    g_rs422_tx_error_count++;
+    return RS422_PING_TEST_TX_FAILURE;
+  }
 
-  /* Discard ignored periodic traffic accumulated during the inter-test gap. */
-  __HAL_UART_CLEAR_OREFLAG(&huart4);
-  __HAL_UART_FLUSH_DRREGISTER(&huart4);
+  g_rs422_tx_busy = 1u;
+  tx_status = HAL_UART_Transmit_IT(
+    &huart4,
+    g_rs422_tx_frame,
+    (uint16_t)tx_frame_length);
 
-  /*
-   * Temporary blocking UART TX for RS-422 physical-link bring-up.
-   * The final RS422Task will own UART4 and use event-driven/interrupt TX.
-   */
-  if (HAL_UART_Transmit(
-        &huart4,
-        g_rs422_tx_frame,
-        (uint16_t)tx_frame_length,
-        RS422_BRINGUP_TX_TIMEOUT_MS) != HAL_OK)
+  if (tx_status != HAL_OK)
+  {
+    g_rs422_tx_busy = 0u;
+
+    if (tx_status == HAL_BUSY)
+    {
+      g_rs422_tx_busy_count++;
+    }
+    else
+    {
+      g_rs422_tx_error_count++;
+    }
+
+    return RS422_PING_TEST_TX_FAILURE;
+  }
+
+  if (rs422_wait_for_tx_complete(sequence, &matching_pong_received) !=
+      RS422_PING_TEST_PASS)
   {
     return RS422_PING_TEST_TX_FAILURE;
   }
 
-  wait_start_ms = HAL_GetTick();
-  while ((uint32_t)(HAL_GetTick() - wait_start_ms) <
-         RS422_BRINGUP_PONG_TIMEOUT_MS)
+  if (matching_pong_received != 0u)
   {
-    const HAL_StatusTypeDef uart_status = HAL_UART_Receive(
-      &huart4,
-      &rx_byte,
-      1u,
-      RS422_BRINGUP_RX_BYTE_TIMEOUT_MS);
+    return RS422_PING_TEST_PASS;
+  }
 
-    if (uart_status == HAL_TIMEOUT)
+  pong_timeout_ticks =
+    rs422_ms_to_kernel_ticks(RS422_BRINGUP_PONG_TIMEOUT_MS);
+  wait_start_ticks = osKernelGetTickCount();
+
+  while ((uint32_t)(osKernelGetTickCount() - wait_start_ticks) <
+         pong_timeout_ticks)
+  {
+    if (rs422_process_rx_buffer(sequence, 1u) != 0u)
     {
-      continue;
+      return RS422_PING_TEST_PASS;
     }
 
-    if (uart_status != HAL_OK)
+    const uint32_t elapsed_ticks =
+      (uint32_t)(osKernelGetTickCount() - wait_start_ticks);
+
+    if (elapsed_ticks >= pong_timeout_ticks)
+    {
+      break;
+    }
+
+    const uint32_t remaining_ticks = pong_timeout_ticks - elapsed_ticks;
+
+    const uint32_t flags = osThreadFlagsWait(
+      RS422_EVENT_MASK,
+      osFlagsWaitAny,
+      remaining_ticks);
+
+    if (flags == osFlagsErrorTimeout)
+    {
+      break;
+    }
+
+    if ((flags & osFlagsError) != 0u)
     {
       return RS422_PING_TEST_RX_FAILURE;
     }
 
-    const stream_parser_event_t parser_event = stream_parser_feed_byte(
-      &g_rs422_parser,
-      rx_byte,
-      &g_rs422_received_packet);
-
-    if (parser_event == STREAM_EVENT_FRAME)
-    {
-      g_rs422_rx_frame_count++;
-      g_rs422_last_msg_id = g_rs422_received_packet.msg_id;
-
-      if ((g_rs422_received_packet.msg_id == MSG_PONG) &&
-          (g_rs422_received_packet.seq == sequence))
-      {
-        return RS422_PING_TEST_PASS;
-      }
-    }
+    rs422_handle_tx_done_event(flags);
   }
 
   return RS422_PING_TEST_PONG_TIMEOUT;
@@ -250,9 +537,72 @@ int main(void)
   MX_SPI2_Init();
   MX_UART4_Init();
   /* USER CODE BEGIN 2 */
-  g_rs422_ping_test_result = rs422_ping_bringup_run();
 
   /* USER CODE END 2 */
+
+  /* Init scheduler */
+  osKernelInitialize();
+
+  /* USER CODE BEGIN RTOS_MUTEX */
+  /* add mutexes, ... */
+  /* USER CODE END RTOS_MUTEX */
+
+  /* USER CODE BEGIN RTOS_SEMAPHORES */
+  /* add semaphores, ... */
+  /* USER CODE END RTOS_SEMAPHORES */
+
+  /* USER CODE BEGIN RTOS_TIMERS */
+  /* start timers, add new ones, ... */
+  /* USER CODE END RTOS_TIMERS */
+
+  /* USER CODE BEGIN RTOS_QUEUES */
+  g_gateway_queue_init_ok = 0u;
+  rs422_cmd_queue = osMessageQueueNew(
+    RS422_CMD_QUEUE_DEPTH,
+    sizeof(protocol_packet_t),
+    &rs422_cmd_queue_attributes);
+  tcp_response_queue = osMessageQueueNew(
+    TCP_RESPONSE_QUEUE_DEPTH,
+    sizeof(protocol_packet_t),
+    &tcp_response_queue_attributes);
+  udp_telemetry_queue = osMessageQueueNew(
+    UDP_TELEMETRY_QUEUE_DEPTH,
+    sizeof(protocol_packet_t),
+    &udp_telemetry_queue_attributes);
+
+  if ((rs422_cmd_queue != NULL) &&
+      (tcp_response_queue != NULL) &&
+      (udp_telemetry_queue != NULL))
+  {
+    g_gateway_queue_init_ok = 1u;
+  }
+  /* USER CODE END RTOS_QUEUES */
+
+  /* Create the thread(s) */
+  /* creation of defaultTask */
+  defaultTaskHandle = osThreadNew(StartDefaultTask, NULL, &defaultTask_attributes);
+
+  /* creation of RS422Task */
+  RS422TaskHandle = osThreadNew(StartRS422Task, NULL, &RS422Task_attributes);
+
+  /* creation of EthernetTask */
+  EthernetTaskHandle = osThreadNew(StartEthernetTask, NULL, &EthernetTask_attributes);
+
+  /* creation of HealthTask */
+  HealthTaskHandle = osThreadNew(StartHealthTask, NULL, &HealthTask_attributes);
+
+  /* USER CODE BEGIN RTOS_THREADS */
+  /* add threads, ... */
+  /* USER CODE END RTOS_THREADS */
+
+  /* USER CODE BEGIN RTOS_EVENTS */
+  /* add events, ... */
+  /* USER CODE END RTOS_EVENTS */
+
+  /* Start scheduler */
+  osKernelStart();
+
+  /* We should never get here as control is now taken by the scheduler */
 
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
@@ -465,10 +815,10 @@ static void MX_GPIO_Init(void)
   HAL_GPIO_Init(W5500_INT_GPIO_Port, &GPIO_InitStruct);
 
   /* EXTI interrupt init*/
-  HAL_NVIC_SetPriority(EXTI9_5_IRQn, 0, 0);
+  HAL_NVIC_SetPriority(EXTI9_5_IRQn, 5, 0);
   HAL_NVIC_EnableIRQ(EXTI9_5_IRQn);
 
-  HAL_NVIC_SetPriority(EXTI15_10_IRQn, 0, 0);
+  HAL_NVIC_SetPriority(EXTI15_10_IRQn, 5, 0);
   HAL_NVIC_EnableIRQ(EXTI15_10_IRQn);
 
   /* USER CODE BEGIN MX_GPIO_Init_2 */
@@ -477,8 +827,237 @@ static void MX_GPIO_Init(void)
 }
 
 /* USER CODE BEGIN 4 */
+void HAL_UART_TxCpltCallback(UART_HandleTypeDef *huart)
+{
+  if ((huart != NULL) &&
+      (huart->Instance == UART4) &&
+      (RS422TaskHandle != NULL))
+  {
+    (void)osThreadFlagsSet(RS422TaskHandle, RS422_EVENT_TX_DONE);
+  }
+}
+
+void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
+{
+  if ((huart != NULL) && (huart->Instance == UART4))
+  {
+    rs422_rx_ring_push_from_isr(g_uart4_rx_byte);
+
+    if (HAL_UART_Receive_IT(&huart4, &g_uart4_rx_byte, 1u) != HAL_OK)
+    {
+      g_rs422_uart_rx_error_count++;
+    }
+
+    if (RS422TaskHandle != NULL)
+    {
+      (void)osThreadFlagsSet(RS422TaskHandle, RS422_EVENT_RX);
+    }
+  }
+}
+
+void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart)
+{
+  if ((huart != NULL) && (huart->Instance == UART4))
+  {
+    g_rs422_uart_rx_error_count++;
+
+    if ((huart->RxState == HAL_UART_STATE_READY) &&
+        (HAL_UART_Receive_IT(&huart4, &g_uart4_rx_byte, 1u) != HAL_OK))
+    {
+      g_rs422_uart_rx_error_count++;
+    }
+
+    if (RS422TaskHandle != NULL)
+    {
+      (void)osThreadFlagsSet(RS422TaskHandle, RS422_EVENT_RX);
+    }
+  }
+}
 
 /* USER CODE END 4 */
+
+/* USER CODE BEGIN Header_StartDefaultTask */
+/**
+  * @brief  Function implementing the defaultTask thread.
+  * @param  argument: Not used
+  * @retval None
+  */
+/* USER CODE END Header_StartDefaultTask */
+void StartDefaultTask(void *argument)
+{
+  /* USER CODE BEGIN 5 */
+  /* Infinite loop */
+  for(;;)
+  {
+    osDelay(1);
+  }
+  /* USER CODE END 5 */
+}
+
+/* USER CODE BEGIN Header_StartRS422Task */
+/**
+* @brief Function implementing the RS422Task thread.
+* @param argument: Not used
+* @retval None
+*/
+/* USER CODE END Header_StartRS422Task */
+void StartRS422Task(void *argument)
+{
+  /* USER CODE BEGIN StartRS422Task */
+  g_rs422_rx_head = 0u;
+  g_rs422_rx_tail = 0u;
+  g_rs422_rx_overflow_count = 0u;
+  g_rs422_uart_rx_error_count = 0u;
+  g_rs422_tx_busy = 0u;
+  g_rs422_tx_complete_count = 0u;
+  g_rs422_tx_busy_count = 0u;
+  g_rs422_tx_error_count = 0u;
+  g_rs422_tx_timeout_count = 0u;
+  g_rs422_last_valid_frame_tick = 0u;
+  g_rs422_has_valid_frame = 0u;
+  stream_parser_init(&g_rs422_parser);
+
+  if (HAL_UART_Receive_IT(&huart4, &g_uart4_rx_byte, 1u) == HAL_OK)
+  {
+    g_rs422_ping_test_result = rs422_ping_bringup_run();
+  }
+  else
+  {
+    g_rs422_uart_rx_error_count++;
+    g_rs422_ping_test_result = RS422_PING_TEST_RX_FAILURE;
+  }
+
+  /* Infinite loop */
+  for(;;)
+  {
+    (void)rs422_process_rx_buffer(0u, 0u);
+
+    const uint32_t flags = osThreadFlagsWait(
+      RS422_EVENT_MASK,
+      osFlagsWaitAny,
+      osWaitForever);
+
+    if ((flags & osFlagsError) == 0u)
+    {
+      rs422_handle_tx_done_event(flags);
+    }
+    else
+    {
+      g_rs422_tx_error_count++;
+    }
+  }
+  /* USER CODE END StartRS422Task */
+}
+
+/* USER CODE BEGIN Header_StartEthernetTask */
+/**
+* @brief Function implementing the EthernetTask thread.
+* @param argument: Not used
+* @retval None
+*/
+/* USER CODE END Header_StartEthernetTask */
+void StartEthernetTask(void *argument)
+{
+  /* USER CODE BEGIN StartEthernetTask */
+  /* Infinite loop */
+  for(;;)
+  {
+    osDelay(1);
+  }
+  /* USER CODE END StartEthernetTask */
+}
+
+/* USER CODE BEGIN Header_StartHealthTask */
+/**
+* @brief Function implementing the HealthTask thread.
+* @param argument: Not used
+* @retval None
+*/
+/* USER CODE END Header_StartHealthTask */
+void StartHealthTask(void *argument)
+{
+  /* USER CODE BEGIN StartHealthTask */
+  const uint32_t health_period_ticks =
+    rs422_ms_to_kernel_ticks(HEALTH_TASK_PERIOD_MS);
+  const uint32_t comm_timeout_ticks =
+    rs422_ms_to_kernel_ticks(RS422_COMM_TIMEOUT_MS);
+  const uint32_t health_start_tick = osKernelGetTickCount();
+  uint32_t next_wake_tick = health_start_tick;
+
+  g_rs422_comm_state = COMM_INIT;
+  g_rs422_comm_timeout_count = 0u;
+  g_rs422_comm_recovery_count = 0u;
+
+  /* Infinite loop */
+  for(;;)
+  {
+    next_wake_tick += health_period_ticks;
+    (void)osDelayUntil(next_wake_tick);
+
+    const uint32_t current_tick = osKernelGetTickCount();
+    const uint32_t has_valid_frame = g_rs422_has_valid_frame;
+    const uint32_t last_valid_frame_tick =
+      g_rs422_last_valid_frame_tick;
+
+    if (has_valid_frame != 0u)
+    {
+      if ((uint32_t)(current_tick - last_valid_frame_tick) >=
+          comm_timeout_ticks)
+      {
+        if (g_rs422_comm_state != COMM_TIMEOUT)
+        {
+          g_rs422_comm_timeout_count++;
+          g_rs422_comm_state = COMM_TIMEOUT;
+        }
+      }
+      else if (g_rs422_comm_state != COMM_OK)
+      {
+        if (g_rs422_comm_state == COMM_TIMEOUT)
+        {
+          g_rs422_comm_recovery_count++;
+        }
+
+        g_rs422_comm_state = COMM_OK;
+      }
+    }
+    else if ((uint32_t)(current_tick - health_start_tick) >=
+             comm_timeout_ticks)
+    {
+      if (g_rs422_comm_state != COMM_TIMEOUT)
+      {
+        g_rs422_comm_timeout_count++;
+        g_rs422_comm_state = COMM_TIMEOUT;
+      }
+    }
+
+    g_gateway_free_heap_bytes = (uint32_t)xPortGetFreeHeapSize();
+    g_gateway_min_ever_free_heap_bytes =
+      (uint32_t)xPortGetMinimumEverFreeHeapSize();
+  }
+  /* USER CODE END StartHealthTask */
+}
+
+/**
+  * @brief  Period elapsed callback in non blocking mode
+  * @note   This function is called  when TIM6 interrupt took place, inside
+  * HAL_TIM_IRQHandler(). It makes a direct call to HAL_IncTick() to increment
+  * a global variable "uwTick" used as application time base.
+  * @param  htim : TIM handle
+  * @retval None
+  */
+void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
+{
+  /* USER CODE BEGIN Callback 0 */
+
+  /* USER CODE END Callback 0 */
+  if (htim->Instance == TIM6)
+  {
+    HAL_IncTick();
+  }
+  /* USER CODE BEGIN Callback 1 */
+
+  /* USER CODE END Callback 1 */
+}
 
 /**
   * @brief  This function is executed in case of error occurrence.
