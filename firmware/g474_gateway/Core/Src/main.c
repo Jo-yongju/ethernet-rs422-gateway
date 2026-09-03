@@ -71,8 +71,83 @@ typedef enum
 #define W5500_PHYCFGR_ADDRESS              0x002eu
 #define W5500_PHYCFGR_LNK                  0x01u
 #define W5500_PHY_POLL_PERIOD_MS           100u
+#define W5500_GAR_ADDRESS                  0x0001u
+#define W5500_SUBR_ADDRESS                 0x0005u
+#define W5500_SHAR_ADDRESS                 0x0009u
+#define W5500_SIPR_ADDRESS                 0x000fu
+#define W5500_GAR_LENGTH                   4u
+#define W5500_SUBR_LENGTH                  4u
+#define W5500_SHAR_LENGTH                  6u
+#define W5500_SIPR_LENGTH                  4u
+#define W5500_NET_MAX_REGISTER_LENGTH      W5500_SHAR_LENGTH
+#define W5500_COMMON_HEADER_LENGTH         3u
 /* BSB[4:0] = 00000 (Common), RWB = 0 (Read), OM[1:0] = 00 (VDM). */
 #define W5500_COMMON_READ_VDM              0x00u
+/* BSB[4:0] = 00000 (Common), RWB = 1 (Write), OM[1:0] = 00 (VDM). */
+#define W5500_COMMON_WRITE_VDM             0x04u
+#define W5500_SOCKET0_READ_VDM             0x08u
+#define W5500_SOCKET0_WRITE_VDM            0x0cu
+#define W5500_SOCKET0_MR_ADDRESS           0x0000u
+#define W5500_SOCKET0_CR_ADDRESS           0x0001u
+#define W5500_SOCKET0_IR_ADDRESS           0x0002u
+#define W5500_SOCKET0_SR_ADDRESS           0x0003u
+#define W5500_SOCKET0_PORT_ADDRESS         0x0004u
+#define W5500_SOCKET0_TX_FSR_ADDRESS       0x0020u
+#define W5500_SOCKET0_TX_WR_ADDRESS        0x0024u
+#define W5500_SOCKET0_RX_RSR_ADDRESS       0x0026u
+#define W5500_SOCKET0_RX_RD_ADDRESS        0x0028u
+#define W5500_SOCKET0_MAX_DATA_LENGTH      2u
+#define W5500_SOCKET0_TX_BUFFER_WRITE_VDM  0x14u
+#define W5500_SOCKET0_RX_BUFFER_READ_VDM   0x18u
+#define W5500_SOCKET0_TCP_MODE             0x01u
+#define W5500_SOCKET0_OPEN_COMMAND         0x01u
+#define W5500_SOCKET0_LISTEN_COMMAND       0x02u
+#define W5500_SOCKET0_SEND_COMMAND         0x20u
+#define W5500_SOCKET0_RECV_COMMAND         0x40u
+#define W5500_SOCKET0_IR_SEND_OK           0x10u
+#define W5500_SOCKET0_IR_TIMEOUT           0x08u
+#define W5500_SOCKET0_STATUS_CLOSED        0x00u
+#define W5500_SOCKET0_STATUS_INIT          0x13u
+#define W5500_SOCKET0_STATUS_LISTEN        0x14u
+#define W5500_SOCKET0_STATUS_ESTABLISHED   0x17u
+#define W5500_TCP_SERVER_PORT              5000u
+#define W5500_SOCKET_STATE_TIMEOUT_MS      1000u
+#define W5500_SOCKET_STATE_POLL_MS         10u
+#define W5500_TCP_STABLE_READ_ATTEMPTS     8u
+#define W5500_TCP_RX_CHUNK_SIZE            64u
+#define W5500_TCP_TX_FREE_TIMEOUT_MS       1000u
+#define W5500_TCP_SEND_TIMEOUT_MS          1000u
+#define W5500_TCP_IO_POLL_MS               10u
+#define W5500_SOCKET_COMMAND_TIMEOUT_MS    100u
+#define W5500_SOCKET_COMMAND_POLL_MS       1u
+#define W5500_SOCKET1_READ_VDM             0x28u
+#define W5500_SOCKET1_WRITE_VDM            0x2cu
+#define W5500_SOCKET1_TX_BUFFER_WRITE_VDM  0x34u
+#define W5500_SOCKET1_MR_ADDRESS           0x0000u
+#define W5500_SOCKET1_CR_ADDRESS           0x0001u
+#define W5500_SOCKET1_IR_ADDRESS           0x0002u
+#define W5500_SOCKET1_SR_ADDRESS           0x0003u
+#define W5500_SOCKET1_PORT_ADDRESS         0x0004u
+#define W5500_SOCKET1_DIPR_ADDRESS         0x000cu
+#define W5500_SOCKET1_DPORT_ADDRESS        0x0010u
+#define W5500_SOCKET1_TX_FSR_ADDRESS       0x0020u
+#define W5500_SOCKET1_TX_WR_ADDRESS        0x0024u
+#define W5500_SOCKET1_MAX_DATA_LENGTH      4u
+#define W5500_SOCKET1_UDP_MODE             0x02u
+#define W5500_SOCKET1_OPEN_COMMAND         0x01u
+#define W5500_SOCKET1_SEND_COMMAND         0x20u
+#define W5500_SOCKET1_IR_SEND_OK           0x10u
+#define W5500_SOCKET1_IR_TIMEOUT           0x08u
+#define W5500_SOCKET1_STATUS_CLOSED        0x00u
+#define W5500_SOCKET1_STATUS_UDP           0x22u
+#define W5500_UDP_LOCAL_PORT               5001u
+#define W5500_UDP_DESTINATION_PORT         5002u
+#define W5500_UDP_PAYLOAD_LENGTH           6u
+#define W5500_UDP_STABLE_READ_ATTEMPTS     8u
+#define W5500_UDP_TX_FREE_TIMEOUT_MS       1000u
+#define W5500_UDP_SEND_TIMEOUT_MS          1000u
+#define W5500_UDP_IO_POLL_MS               10u
+#define W5500_UDP_SPI_CHUNK_SIZE           64u
 
 /* USER CODE END PD */
 
@@ -144,6 +219,51 @@ static volatile int32_t g_w5500_spi_status = -1;
 static volatile uint8_t g_w5500_phycfgr = 0u;
 static volatile uint32_t g_w5500_link_up = 0u;
 static volatile int32_t g_w5500_phy_spi_status = -1;
+static volatile uint32_t g_w5500_net_config_ok = 0u;
+static volatile uint32_t g_w5500_net_readback_ok = 0u;
+static volatile int32_t g_w5500_net_write_status = -1;
+static volatile int32_t g_w5500_net_read_status = -1;
+static uint8_t g_w5500_gar_readback[W5500_GAR_LENGTH] = {0u};
+static uint8_t g_w5500_subr_readback[W5500_SUBR_LENGTH] = {0u};
+static uint8_t g_w5500_shar_readback[W5500_SHAR_LENGTH] = {0u};
+static uint8_t g_w5500_sipr_readback[W5500_SIPR_LENGTH] = {0u};
+static const uint8_t g_w5500_net_gateway[W5500_GAR_LENGTH] = {
+  0u, 0u, 0u, 0u
+};
+static const uint8_t g_w5500_net_subnet[W5500_SUBR_LENGTH] = {
+  255u, 255u, 255u, 0u
+};
+static const uint8_t g_w5500_net_mac[W5500_SHAR_LENGTH] = {
+  0x02u, 0x00u, 0x00u, 0x00u, 0x00u, 0x02u
+};
+static const uint8_t g_w5500_net_ip[W5500_SIPR_LENGTH] = {
+  192u, 168u, 77u, 2u
+};
+static volatile uint32_t g_w5500_tcp_init_ok = 0u;
+static volatile uint32_t g_w5500_tcp_listen_ok = 0u;
+static volatile uint8_t g_w5500_socket0_status = W5500_SOCKET0_STATUS_CLOSED;
+static volatile int32_t g_w5500_socket0_spi_status = -1;
+static volatile uint32_t g_w5500_tcp_rx_bytes = 0u;
+static volatile uint32_t g_w5500_tcp_tx_bytes = 0u;
+static volatile uint32_t g_w5500_tcp_valid_frame_count = 0u;
+static volatile uint32_t g_w5500_tcp_ping_count = 0u;
+static volatile uint32_t g_w5500_tcp_pong_count = 0u;
+static volatile uint8_t g_w5500_tcp_last_rx_msg_id = 0u;
+static volatile uint16_t g_w5500_tcp_last_rx_seq = 0u;
+static volatile uint16_t g_w5500_tcp_last_tx_seq = 0u;
+static volatile uint32_t g_w5500_tcp_rx_error_count = 0u;
+static volatile uint32_t g_w5500_tcp_tx_error_count = 0u;
+static volatile int32_t g_w5500_tcp_last_rx_status = -1;
+static volatile int32_t g_w5500_tcp_last_tx_status = -1;
+static volatile uint32_t g_w5500_udp_open_ok = 0u;
+static volatile uint8_t g_w5500_udp_socket1_status = W5500_SOCKET1_STATUS_CLOSED;
+static volatile int32_t g_w5500_udp_socket1_spi_status = -1;
+static volatile uint32_t g_w5500_udp_tx_packet_count = 0u;
+static volatile uint32_t g_w5500_udp_tx_bytes = 0u;
+static volatile uint32_t g_w5500_udp_tx_error_count = 0u;
+static volatile uint16_t g_w5500_udp_last_tx_seq = 0u;
+static volatile int32_t g_w5500_udp_last_tx_status = -1;
+static volatile uint16_t g_w5500_udp_next_seq = 1u;
 static osMessageQueueId_t rs422_cmd_queue = NULL;
 static osMessageQueueId_t tcp_response_queue = NULL;
 static osMessageQueueId_t udp_telemetry_queue = NULL;
@@ -164,6 +284,18 @@ static uint8_t g_uart4_rx_byte;
 static uint8_t g_rs422_rx_ring[RS422_RX_RING_CAPACITY];
 static volatile uint16_t g_rs422_rx_head = 0u;
 static volatile uint16_t g_rs422_rx_tail = 0u;
+static stream_parser_t g_tcp_parser;
+static protocol_packet_t g_tcp_received_packet;
+static protocol_packet_t g_tcp_pong_packet;
+static uint8_t g_w5500_tcp_rx_chunk[W5500_TCP_RX_CHUNK_SIZE];
+static uint8_t g_w5500_tcp_rx_dummy[W5500_TCP_RX_CHUNK_SIZE];
+static uint8_t g_w5500_tcp_tx_frame[PROTOCOL_MAX_FRAME_SIZE];
+static const uint8_t g_w5500_udp_destination_ip[4] = {
+  192u, 168u, 77u, 1u
+};
+static protocol_packet_t g_udp_telemetry_packet;
+static uint8_t g_w5500_udp_tx_frame[PROTOCOL_MAX_FRAME_SIZE];
+static uint8_t g_w5500_udp_spi_discard[W5500_UDP_SPI_CHUNK_SIZE];
 
 /* USER CODE END PV */
 
@@ -193,6 +325,89 @@ static int32_t rs422_ping_bringup_run(void);
 static void w5500_hardware_reset(void);
 static HAL_StatusTypeDef w5500_read_version(uint8_t *version);
 static HAL_StatusTypeDef w5500_read_common_register(uint16_t address, uint8_t *value);
+static HAL_StatusTypeDef w5500_write_common_registers(
+  uint16_t address,
+  const uint8_t *data,
+  uint16_t length);
+static HAL_StatusTypeDef w5500_read_common_registers(
+  uint16_t address,
+  uint8_t *data,
+  uint16_t length);
+static HAL_StatusTypeDef w5500_write_network_config(void);
+static HAL_StatusTypeDef w5500_read_network_config(void);
+static uint32_t w5500_network_readback_matches(void);
+static HAL_StatusTypeDef w5500_socket0_write_registers(
+  uint16_t address,
+  const uint8_t *data,
+  uint16_t length);
+static HAL_StatusTypeDef w5500_socket0_read_register(
+  uint16_t address,
+  uint8_t *value);
+static HAL_StatusTypeDef w5500_socket0_execute_command(uint8_t command);
+static HAL_StatusTypeDef w5500_socket0_read_registers(
+  uint16_t address,
+  uint8_t *data,
+  uint16_t length);
+static HAL_StatusTypeDef w5500_socket0_read_u16(
+  uint16_t address,
+  uint16_t *value);
+static HAL_StatusTypeDef w5500_socket0_read_stable_u16(
+  uint16_t address,
+  uint16_t *value);
+static HAL_StatusTypeDef w5500_socket0_write_tx_buffer(
+  uint16_t address,
+  const uint8_t *data,
+  uint16_t length);
+static HAL_StatusTypeDef w5500_socket0_read_rx_buffer(
+  uint16_t address,
+  uint8_t *data,
+  uint16_t length);
+static HAL_StatusTypeDef w5500_tcp_wait_for_tx_free(
+  uint16_t required_size);
+static HAL_StatusTypeDef w5500_tcp_wait_for_send_result(void);
+static HAL_StatusTypeDef w5500_tcp_send_frame(
+  const uint8_t *frame,
+  uint16_t frame_length);
+static void w5500_tcp_handle_valid_frame(void);
+static HAL_StatusTypeDef w5500_tcp_process_rx(void);
+static HAL_StatusTypeDef w5500_wait_for_socket0_status(
+  uint8_t expected_status,
+  uint32_t timeout_ms);
+static void w5500_start_tcp_server(void);
+static HAL_StatusTypeDef w5500_socket1_write_registers(
+  uint16_t address,
+  const uint8_t *data,
+  uint16_t length);
+static HAL_StatusTypeDef w5500_socket1_read_register(
+  uint16_t address,
+  uint8_t *value);
+static HAL_StatusTypeDef w5500_socket1_read_registers(
+  uint16_t address,
+  uint8_t *data,
+  uint16_t length);
+static HAL_StatusTypeDef w5500_socket1_read_u16(
+  uint16_t address,
+  uint16_t *value);
+static HAL_StatusTypeDef w5500_socket1_read_stable_u16(
+  uint16_t address,
+  uint16_t *value);
+static HAL_StatusTypeDef w5500_socket1_write_tx_buffer(
+  uint16_t address,
+  const uint8_t *data,
+  uint16_t length);
+static HAL_StatusTypeDef w5500_socket1_execute_command(uint8_t command);
+static HAL_StatusTypeDef w5500_wait_for_socket1_status(
+  uint8_t expected_status,
+  uint32_t timeout_ms);
+static HAL_StatusTypeDef w5500_udp_wait_for_tx_free(
+  uint16_t required_size);
+static HAL_StatusTypeDef w5500_udp_wait_for_send_result(void);
+static HAL_StatusTypeDef w5500_udp_send_frame(
+  const uint8_t *frame,
+  uint16_t frame_length);
+static HAL_StatusTypeDef w5500_start_udp_socket(void);
+static uint32_t w5500_kernel_uptime_ms(void);
+static void w5500_udp_send_telemetry(void);
 
 /* USER CODE END PFP */
 
@@ -239,6 +454,1291 @@ static HAL_StatusTypeDef w5500_read_common_register(uint16_t address, uint8_t *v
   }
 
   return status;
+}
+
+static HAL_StatusTypeDef w5500_write_common_registers(
+  uint16_t address,
+  const uint8_t *data,
+  uint16_t length)
+{
+  uint8_t tx[W5500_COMMON_HEADER_LENGTH + W5500_NET_MAX_REGISTER_LENGTH];
+
+  /* length is the Data Phase byte count; it excludes address and control. */
+  if ((data == NULL) || (length == 0u) ||
+      (length > W5500_NET_MAX_REGISTER_LENGTH))
+  {
+    return HAL_ERROR;
+  }
+
+  tx[0] = (uint8_t)(address >> 8);
+  tx[1] = (uint8_t)(address & 0xffu);
+  tx[2] = W5500_COMMON_WRITE_VDM;
+  for (uint16_t index = 0u; index < length; index++)
+  {
+    tx[W5500_COMMON_HEADER_LENGTH + index] = data[index];
+  }
+
+  HAL_GPIO_WritePin(W5500_CS_GPIO_Port, W5500_CS_Pin, GPIO_PIN_RESET);
+  const HAL_StatusTypeDef status = HAL_SPI_Transmit(
+    &hspi2,
+    tx,
+    (uint16_t)(W5500_COMMON_HEADER_LENGTH + length),
+    W5500_SPI_TIMEOUT_MS);
+  HAL_GPIO_WritePin(W5500_CS_GPIO_Port, W5500_CS_Pin, GPIO_PIN_SET);
+
+  return status;
+}
+
+static HAL_StatusTypeDef w5500_read_common_registers(
+  uint16_t address,
+  uint8_t *data,
+  uint16_t length)
+{
+  uint8_t tx[W5500_COMMON_HEADER_LENGTH + W5500_NET_MAX_REGISTER_LENGTH] = {0u};
+  uint8_t rx[W5500_COMMON_HEADER_LENGTH + W5500_NET_MAX_REGISTER_LENGTH] = {0u};
+
+  /* length is the Data Phase byte count; it excludes address and control. */
+  if ((data == NULL) || (length == 0u) ||
+      (length > W5500_NET_MAX_REGISTER_LENGTH))
+  {
+    return HAL_ERROR;
+  }
+
+  tx[0] = (uint8_t)(address >> 8);
+  tx[1] = (uint8_t)(address & 0xffu);
+  tx[2] = W5500_COMMON_READ_VDM;
+
+  HAL_GPIO_WritePin(W5500_CS_GPIO_Port, W5500_CS_Pin, GPIO_PIN_RESET);
+  const HAL_StatusTypeDef status = HAL_SPI_TransmitReceive(
+    &hspi2,
+    tx,
+    rx,
+    (uint16_t)(W5500_COMMON_HEADER_LENGTH + length),
+    W5500_SPI_TIMEOUT_MS);
+  HAL_GPIO_WritePin(W5500_CS_GPIO_Port, W5500_CS_Pin, GPIO_PIN_SET);
+
+  if (status == HAL_OK)
+  {
+    for (uint16_t index = 0u; index < length; index++)
+    {
+      data[index] = rx[W5500_COMMON_HEADER_LENGTH + index];
+    }
+  }
+
+  return status;
+}
+
+static HAL_StatusTypeDef w5500_write_network_config(void)
+{
+  HAL_StatusTypeDef status = w5500_write_common_registers(
+    W5500_GAR_ADDRESS, g_w5500_net_gateway, W5500_GAR_LENGTH);
+
+  if (status == HAL_OK)
+  {
+    status = w5500_write_common_registers(
+      W5500_SUBR_ADDRESS, g_w5500_net_subnet, W5500_SUBR_LENGTH);
+  }
+  if (status == HAL_OK)
+  {
+    status = w5500_write_common_registers(
+      W5500_SHAR_ADDRESS, g_w5500_net_mac, W5500_SHAR_LENGTH);
+  }
+  if (status == HAL_OK)
+  {
+    status = w5500_write_common_registers(
+      W5500_SIPR_ADDRESS, g_w5500_net_ip, W5500_SIPR_LENGTH);
+  }
+
+  return status;
+}
+
+static HAL_StatusTypeDef w5500_read_network_config(void)
+{
+  HAL_StatusTypeDef status = w5500_read_common_registers(
+    W5500_GAR_ADDRESS, g_w5500_gar_readback, W5500_GAR_LENGTH);
+
+  if (status == HAL_OK)
+  {
+    status = w5500_read_common_registers(
+      W5500_SUBR_ADDRESS, g_w5500_subr_readback, W5500_SUBR_LENGTH);
+  }
+  if (status == HAL_OK)
+  {
+    status = w5500_read_common_registers(
+      W5500_SHAR_ADDRESS, g_w5500_shar_readback, W5500_SHAR_LENGTH);
+  }
+  if (status == HAL_OK)
+  {
+    status = w5500_read_common_registers(
+      W5500_SIPR_ADDRESS, g_w5500_sipr_readback, W5500_SIPR_LENGTH);
+  }
+
+  return status;
+}
+
+static uint32_t w5500_network_readback_matches(void)
+{
+  for (uint16_t index = 0u; index < W5500_GAR_LENGTH; index++)
+  {
+    if ((g_w5500_gar_readback[index] != g_w5500_net_gateway[index]) ||
+        (g_w5500_subr_readback[index] != g_w5500_net_subnet[index]) ||
+        (g_w5500_sipr_readback[index] != g_w5500_net_ip[index]))
+    {
+      return 0u;
+    }
+  }
+
+  for (uint16_t index = 0u; index < W5500_SHAR_LENGTH; index++)
+  {
+    if (g_w5500_shar_readback[index] != g_w5500_net_mac[index])
+    {
+      return 0u;
+    }
+  }
+
+  return 1u;
+}
+
+static HAL_StatusTypeDef w5500_socket0_write_registers(
+  uint16_t address,
+  const uint8_t *data,
+  uint16_t length)
+{
+  uint8_t tx[W5500_COMMON_HEADER_LENGTH + W5500_SOCKET0_MAX_DATA_LENGTH];
+
+  if ((data == NULL) || (length == 0u) ||
+      (length > W5500_SOCKET0_MAX_DATA_LENGTH))
+  {
+    return HAL_ERROR;
+  }
+
+  tx[0] = (uint8_t)(address >> 8);
+  tx[1] = (uint8_t)(address & 0xffu);
+  tx[2] = W5500_SOCKET0_WRITE_VDM;
+  for (uint16_t index = 0u; index < length; index++)
+  {
+    tx[W5500_COMMON_HEADER_LENGTH + index] = data[index];
+  }
+
+  HAL_GPIO_WritePin(W5500_CS_GPIO_Port, W5500_CS_Pin, GPIO_PIN_RESET);
+  const HAL_StatusTypeDef status = HAL_SPI_Transmit(
+    &hspi2,
+    tx,
+    (uint16_t)(W5500_COMMON_HEADER_LENGTH + length),
+    W5500_SPI_TIMEOUT_MS);
+  HAL_GPIO_WritePin(W5500_CS_GPIO_Port, W5500_CS_Pin, GPIO_PIN_SET);
+
+  return status;
+}
+
+static HAL_StatusTypeDef w5500_socket0_read_register(
+  uint16_t address,
+  uint8_t *value)
+{
+  const uint8_t tx[4] = {
+    (uint8_t)(address >> 8),
+    (uint8_t)(address & 0xffu),
+    W5500_SOCKET0_READ_VDM,
+    0u
+  };
+  uint8_t rx[4] = {0u};
+
+  if (value == NULL)
+  {
+    return HAL_ERROR;
+  }
+
+  HAL_GPIO_WritePin(W5500_CS_GPIO_Port, W5500_CS_Pin, GPIO_PIN_RESET);
+  const HAL_StatusTypeDef status = HAL_SPI_TransmitReceive(
+    &hspi2, tx, rx, (uint16_t)sizeof(tx), W5500_SPI_TIMEOUT_MS);
+  HAL_GPIO_WritePin(W5500_CS_GPIO_Port, W5500_CS_Pin, GPIO_PIN_SET);
+
+  if (status == HAL_OK)
+  {
+    *value = rx[3];
+  }
+
+  return status;
+}
+
+static HAL_StatusTypeDef w5500_socket0_execute_command(uint8_t command)
+{
+  HAL_StatusTypeDef status = w5500_socket0_write_registers(
+    W5500_SOCKET0_CR_ADDRESS, &command, 1u);
+  if (status != HAL_OK)
+  {
+    return status;
+  }
+
+  const uint32_t timeout_ticks =
+    rs422_ms_to_kernel_ticks(W5500_SOCKET_COMMAND_TIMEOUT_MS);
+  const uint32_t poll_ticks =
+    rs422_ms_to_kernel_ticks(W5500_SOCKET_COMMAND_POLL_MS);
+  const uint32_t start_tick = osKernelGetTickCount();
+
+  for (;;)
+  {
+    uint8_t command_register = command;
+    status = w5500_socket0_read_register(
+      W5500_SOCKET0_CR_ADDRESS, &command_register);
+    if (status != HAL_OK)
+    {
+      return status;
+    }
+    if (command_register == 0u)
+    {
+      return HAL_OK;
+    }
+    if ((uint32_t)(osKernelGetTickCount() - start_tick) >= timeout_ticks)
+    {
+      return HAL_TIMEOUT;
+    }
+
+    (void)osDelay(poll_ticks);
+  }
+}
+
+static HAL_StatusTypeDef w5500_socket0_read_registers(
+  uint16_t address,
+  uint8_t *data,
+  uint16_t length)
+{
+  uint8_t tx[W5500_COMMON_HEADER_LENGTH + W5500_SOCKET0_MAX_DATA_LENGTH] = {0u};
+  uint8_t rx[W5500_COMMON_HEADER_LENGTH + W5500_SOCKET0_MAX_DATA_LENGTH] = {0u};
+
+  if ((data == NULL) || (length == 0u) ||
+      (length > W5500_SOCKET0_MAX_DATA_LENGTH))
+  {
+    return HAL_ERROR;
+  }
+
+  tx[0] = (uint8_t)(address >> 8);
+  tx[1] = (uint8_t)(address & 0xffu);
+  tx[2] = W5500_SOCKET0_READ_VDM;
+
+  HAL_GPIO_WritePin(W5500_CS_GPIO_Port, W5500_CS_Pin, GPIO_PIN_RESET);
+  const HAL_StatusTypeDef status = HAL_SPI_TransmitReceive(
+    &hspi2,
+    tx,
+    rx,
+    (uint16_t)(W5500_COMMON_HEADER_LENGTH + length),
+    W5500_SPI_TIMEOUT_MS);
+  HAL_GPIO_WritePin(W5500_CS_GPIO_Port, W5500_CS_Pin, GPIO_PIN_SET);
+
+  if (status == HAL_OK)
+  {
+    for (uint16_t index = 0u; index < length; index++)
+    {
+      data[index] = rx[W5500_COMMON_HEADER_LENGTH + index];
+    }
+  }
+
+  return status;
+}
+
+static HAL_StatusTypeDef w5500_socket0_read_u16(
+  uint16_t address,
+  uint16_t *value)
+{
+  uint8_t data[2] = {0u};
+
+  if (value == NULL)
+  {
+    return HAL_ERROR;
+  }
+
+  const HAL_StatusTypeDef status = w5500_socket0_read_registers(
+    address, data, (uint16_t)sizeof(data));
+  if (status == HAL_OK)
+  {
+    *value = (uint16_t)(((uint16_t)data[0] << 8) | data[1]);
+  }
+
+  return status;
+}
+
+static HAL_StatusTypeDef w5500_socket0_read_stable_u16(
+  uint16_t address,
+  uint16_t *value)
+{
+  uint16_t previous_value = 0u;
+  uint16_t current_value = 0u;
+
+  if (value == NULL)
+  {
+    return HAL_ERROR;
+  }
+
+  for (uint32_t attempt = 0u;
+       attempt < W5500_TCP_STABLE_READ_ATTEMPTS;
+       attempt++)
+  {
+    const HAL_StatusTypeDef status =
+      w5500_socket0_read_u16(address, &current_value);
+    if (status != HAL_OK)
+    {
+      return status;
+    }
+
+    if ((attempt != 0u) && (current_value == previous_value))
+    {
+      *value = current_value;
+      return HAL_OK;
+    }
+
+    previous_value = current_value;
+  }
+
+  /* Do not update the caller's value when no consecutive reads are stable. */
+  return HAL_TIMEOUT;
+}
+
+static HAL_StatusTypeDef w5500_socket0_write_tx_buffer(
+  uint16_t address,
+  const uint8_t *data,
+  uint16_t length)
+{
+  const uint8_t header[W5500_COMMON_HEADER_LENGTH] = {
+    (uint8_t)(address >> 8),
+    (uint8_t)(address & 0xffu),
+    W5500_SOCKET0_TX_BUFFER_WRITE_VDM
+  };
+  uint8_t header_rx[W5500_COMMON_HEADER_LENGTH] = {0u};
+
+  if ((data == NULL) || (length == 0u) ||
+      (length > PROTOCOL_MAX_FRAME_SIZE))
+  {
+    return HAL_ERROR;
+  }
+
+  HAL_GPIO_WritePin(W5500_CS_GPIO_Port, W5500_CS_Pin, GPIO_PIN_RESET);
+  HAL_StatusTypeDef status = HAL_SPI_TransmitReceive(
+    &hspi2,
+    header,
+    header_rx,
+    (uint16_t)sizeof(header),
+    W5500_SPI_TIMEOUT_MS);
+  uint16_t offset = 0u;
+  while ((status == HAL_OK) && (offset < length))
+  {
+    const uint16_t remaining = (uint16_t)(length - offset);
+    const uint16_t chunk_length = (remaining > W5500_TCP_RX_CHUNK_SIZE) ?
+      W5500_TCP_RX_CHUNK_SIZE : remaining;
+    status = HAL_SPI_TransmitReceive(
+      &hspi2,
+      &data[offset],
+      g_w5500_tcp_rx_dummy,
+      chunk_length,
+      W5500_SPI_TIMEOUT_MS);
+    offset = (uint16_t)(offset + chunk_length);
+  }
+  HAL_GPIO_WritePin(W5500_CS_GPIO_Port, W5500_CS_Pin, GPIO_PIN_SET);
+
+  return status;
+}
+
+static HAL_StatusTypeDef w5500_socket0_read_rx_buffer(
+  uint16_t address,
+  uint8_t *data,
+  uint16_t length)
+{
+  const uint8_t header[W5500_COMMON_HEADER_LENGTH] = {
+    (uint8_t)(address >> 8),
+    (uint8_t)(address & 0xffu),
+    W5500_SOCKET0_RX_BUFFER_READ_VDM
+  };
+  uint8_t header_rx[W5500_COMMON_HEADER_LENGTH] = {0u};
+
+  if ((data == NULL) || (length == 0u) ||
+      (length > W5500_TCP_RX_CHUNK_SIZE))
+  {
+    return HAL_ERROR;
+  }
+
+  HAL_GPIO_WritePin(W5500_CS_GPIO_Port, W5500_CS_Pin, GPIO_PIN_RESET);
+  HAL_StatusTypeDef status = HAL_SPI_TransmitReceive(
+    &hspi2,
+    header,
+    header_rx,
+    (uint16_t)sizeof(header),
+    W5500_SPI_TIMEOUT_MS);
+  if (status == HAL_OK)
+  {
+    status = HAL_SPI_TransmitReceive(
+      &hspi2,
+      g_w5500_tcp_rx_dummy,
+      data,
+      length,
+      W5500_SPI_TIMEOUT_MS);
+  }
+  HAL_GPIO_WritePin(W5500_CS_GPIO_Port, W5500_CS_Pin, GPIO_PIN_SET);
+
+  return status;
+}
+
+static HAL_StatusTypeDef w5500_tcp_wait_for_tx_free(
+  uint16_t required_size)
+{
+  const uint32_t timeout_ticks =
+    rs422_ms_to_kernel_ticks(W5500_TCP_TX_FREE_TIMEOUT_MS);
+  const uint32_t poll_ticks =
+    rs422_ms_to_kernel_ticks(W5500_TCP_IO_POLL_MS);
+  const uint32_t start_tick = osKernelGetTickCount();
+
+  for (;;)
+  {
+    uint16_t free_size = 0u;
+    const HAL_StatusTypeDef status = w5500_socket0_read_stable_u16(
+      W5500_SOCKET0_TX_FSR_ADDRESS, &free_size);
+    if (status != HAL_OK)
+    {
+      return status;
+    }
+    if (free_size >= required_size)
+    {
+      return HAL_OK;
+    }
+    if ((uint32_t)(osKernelGetTickCount() - start_tick) >= timeout_ticks)
+    {
+      return HAL_TIMEOUT;
+    }
+
+    (void)osDelay(poll_ticks);
+  }
+}
+
+static HAL_StatusTypeDef w5500_tcp_wait_for_send_result(void)
+{
+  const uint32_t timeout_ticks =
+    rs422_ms_to_kernel_ticks(W5500_TCP_SEND_TIMEOUT_MS);
+  const uint32_t poll_ticks =
+    rs422_ms_to_kernel_ticks(W5500_TCP_IO_POLL_MS);
+  const uint32_t start_tick = osKernelGetTickCount();
+
+  for (;;)
+  {
+    uint8_t socket_interrupt = 0u;
+    HAL_StatusTypeDef status = w5500_socket0_read_register(
+      W5500_SOCKET0_IR_ADDRESS, &socket_interrupt);
+    if (status != HAL_OK)
+    {
+      return status;
+    }
+
+    const uint8_t send_result = (uint8_t)(socket_interrupt &
+      (W5500_SOCKET0_IR_SEND_OK | W5500_SOCKET0_IR_TIMEOUT));
+    if (send_result != 0u)
+    {
+      status = w5500_socket0_write_registers(
+        W5500_SOCKET0_IR_ADDRESS, &send_result, 1u);
+      if (status != HAL_OK)
+      {
+        return status;
+      }
+
+      if ((send_result & W5500_SOCKET0_IR_TIMEOUT) != 0u)
+      {
+        return HAL_TIMEOUT;
+      }
+      return HAL_OK;
+    }
+
+    if ((uint32_t)(osKernelGetTickCount() - start_tick) >= timeout_ticks)
+    {
+      return HAL_TIMEOUT;
+    }
+
+    (void)osDelay(poll_ticks);
+  }
+}
+
+static HAL_StatusTypeDef w5500_tcp_send_frame(
+  const uint8_t *frame,
+  uint16_t frame_length)
+{
+  if ((frame == NULL) || (frame_length == 0u) ||
+      (frame_length > PROTOCOL_MAX_FRAME_SIZE))
+  {
+    return HAL_ERROR;
+  }
+
+  HAL_StatusTypeDef status = w5500_tcp_wait_for_tx_free(frame_length);
+  if (status != HAL_OK)
+  {
+    return status;
+  }
+
+  uint16_t tx_write_pointer = 0u;
+  status = w5500_socket0_read_u16(
+    W5500_SOCKET0_TX_WR_ADDRESS, &tx_write_pointer);
+  if (status != HAL_OK)
+  {
+    return status;
+  }
+
+  status = w5500_socket0_write_tx_buffer(
+    tx_write_pointer, frame, frame_length);
+  if (status != HAL_OK)
+  {
+    return status;
+  }
+
+  const uint16_t new_tx_write_pointer =
+    (uint16_t)(tx_write_pointer + frame_length);
+  const uint8_t tx_write_pointer_bytes[2] = {
+    (uint8_t)(new_tx_write_pointer >> 8),
+    (uint8_t)(new_tx_write_pointer & 0xffu)
+  };
+  status = w5500_socket0_write_registers(
+    W5500_SOCKET0_TX_WR_ADDRESS,
+    tx_write_pointer_bytes,
+    (uint16_t)sizeof(tx_write_pointer_bytes));
+  if (status != HAL_OK)
+  {
+    return status;
+  }
+
+  /* Sn_IR is write-one-to-clear. Clear only SEND result bits before SEND. */
+  const uint8_t stale_send_bits =
+    W5500_SOCKET0_IR_SEND_OK | W5500_SOCKET0_IR_TIMEOUT;
+  status = w5500_socket0_write_registers(
+    W5500_SOCKET0_IR_ADDRESS, &stale_send_bits, 1u);
+  if (status != HAL_OK)
+  {
+    return status;
+  }
+
+  status = w5500_socket0_execute_command(W5500_SOCKET0_SEND_COMMAND);
+  if (status != HAL_OK)
+  {
+    return status;
+  }
+
+  return w5500_tcp_wait_for_send_result();
+}
+
+static void w5500_tcp_handle_valid_frame(void)
+{
+  g_w5500_tcp_valid_frame_count++;
+  g_w5500_tcp_last_rx_msg_id = g_tcp_received_packet.msg_id;
+  g_w5500_tcp_last_rx_seq = g_tcp_received_packet.seq;
+
+  if (g_tcp_received_packet.msg_id != MSG_PING)
+  {
+    return;
+  }
+
+  g_w5500_tcp_ping_count++;
+  g_tcp_pong_packet.version = PROTOCOL_VERSION;
+  g_tcp_pong_packet.msg_id = MSG_PONG;
+  g_tcp_pong_packet.seq = g_tcp_received_packet.seq;
+  g_tcp_pong_packet.length = 0u;
+
+  size_t encoded_length = 0u;
+  const protocol_result_t encode_status = protocol_encode(
+    &g_tcp_pong_packet,
+    g_w5500_tcp_tx_frame,
+    sizeof(g_w5500_tcp_tx_frame),
+    &encoded_length);
+  if ((encode_status != PROTO_OK) || (encoded_length == 0u) ||
+      (encoded_length > UINT16_MAX))
+  {
+    g_w5500_tcp_last_tx_status = (int32_t)encode_status;
+    g_w5500_tcp_tx_error_count++;
+    return;
+  }
+
+  const HAL_StatusTypeDef send_status = w5500_tcp_send_frame(
+    g_w5500_tcp_tx_frame, (uint16_t)encoded_length);
+  g_w5500_tcp_last_tx_status = (int32_t)send_status;
+  if (send_status == HAL_OK)
+  {
+    g_w5500_tcp_tx_bytes += (uint32_t)encoded_length;
+    g_w5500_tcp_pong_count++;
+    g_w5500_tcp_last_tx_seq = g_tcp_pong_packet.seq;
+  }
+  else
+  {
+    g_w5500_tcp_tx_error_count++;
+  }
+}
+
+static HAL_StatusTypeDef w5500_tcp_process_rx(void)
+{
+  uint16_t received_size = 0u;
+  HAL_StatusTypeDef status = w5500_socket0_read_stable_u16(
+    W5500_SOCKET0_RX_RSR_ADDRESS, &received_size);
+  if ((status != HAL_OK) || (received_size == 0u))
+  {
+    return status;
+  }
+
+  const uint16_t read_length = (received_size > W5500_TCP_RX_CHUNK_SIZE) ?
+    W5500_TCP_RX_CHUNK_SIZE : received_size;
+  uint16_t rx_read_pointer = 0u;
+  status = w5500_socket0_read_u16(
+    W5500_SOCKET0_RX_RD_ADDRESS, &rx_read_pointer);
+  if (status != HAL_OK)
+  {
+    return status;
+  }
+
+  status = w5500_socket0_read_rx_buffer(
+    rx_read_pointer, g_w5500_tcp_rx_chunk, read_length);
+  if (status != HAL_OK)
+  {
+    return status;
+  }
+
+  const uint16_t new_rx_read_pointer =
+    (uint16_t)(rx_read_pointer + read_length);
+  const uint8_t rx_read_pointer_bytes[2] = {
+    (uint8_t)(new_rx_read_pointer >> 8),
+    (uint8_t)(new_rx_read_pointer & 0xffu)
+  };
+  status = w5500_socket0_write_registers(
+    W5500_SOCKET0_RX_RD_ADDRESS,
+    rx_read_pointer_bytes,
+    (uint16_t)sizeof(rx_read_pointer_bytes));
+  if (status != HAL_OK)
+  {
+    return status;
+  }
+
+  status = w5500_socket0_execute_command(W5500_SOCKET0_RECV_COMMAND);
+  if (status != HAL_OK)
+  {
+    return status;
+  }
+
+  g_w5500_tcp_rx_bytes += read_length;
+  for (uint16_t index = 0u; index < read_length; index++)
+  {
+    const stream_parser_event_t parser_event = stream_parser_feed_byte(
+      &g_tcp_parser,
+      g_w5500_tcp_rx_chunk[index],
+      &g_tcp_received_packet);
+    if (parser_event == STREAM_EVENT_FRAME)
+    {
+      w5500_tcp_handle_valid_frame();
+    }
+    else if (parser_event == STREAM_EVENT_ERROR)
+    {
+      g_w5500_tcp_rx_error_count++;
+    }
+  }
+
+  return HAL_OK;
+}
+
+static HAL_StatusTypeDef w5500_wait_for_socket0_status(
+  uint8_t expected_status,
+  uint32_t timeout_ms)
+{
+  const uint32_t timeout_ticks = rs422_ms_to_kernel_ticks(timeout_ms);
+  const uint32_t poll_ticks =
+    rs422_ms_to_kernel_ticks(W5500_SOCKET_STATE_POLL_MS);
+  const uint32_t start_tick = osKernelGetTickCount();
+
+  for (;;)
+  {
+    uint8_t socket_status = W5500_SOCKET0_STATUS_CLOSED;
+    const HAL_StatusTypeDef spi_status = w5500_socket0_read_register(
+      W5500_SOCKET0_SR_ADDRESS, &socket_status);
+    g_w5500_socket0_spi_status = (int32_t)spi_status;
+
+    if (spi_status != HAL_OK)
+    {
+      return spi_status;
+    }
+
+    g_w5500_socket0_status = socket_status;
+    if (socket_status == expected_status)
+    {
+      return HAL_OK;
+    }
+
+    if ((uint32_t)(osKernelGetTickCount() - start_tick) >= timeout_ticks)
+    {
+      return HAL_TIMEOUT;
+    }
+
+    (void)osDelay(poll_ticks);
+  }
+}
+
+static void w5500_start_tcp_server(void)
+{
+  const uint8_t tcp_mode = W5500_SOCKET0_TCP_MODE;
+  const uint8_t server_port[2] = {
+    (uint8_t)(W5500_TCP_SERVER_PORT >> 8),
+    (uint8_t)(W5500_TCP_SERVER_PORT & 0xffu)
+  };
+  const uint8_t open_command = W5500_SOCKET0_OPEN_COMMAND;
+  const uint8_t listen_command = W5500_SOCKET0_LISTEN_COMMAND;
+
+  HAL_StatusTypeDef status = w5500_socket0_write_registers(
+    W5500_SOCKET0_MR_ADDRESS, &tcp_mode, 1u);
+  g_w5500_socket0_spi_status = (int32_t)status;
+
+  if (status == HAL_OK)
+  {
+    status = w5500_socket0_write_registers(
+      W5500_SOCKET0_PORT_ADDRESS, server_port, (uint16_t)sizeof(server_port));
+    g_w5500_socket0_spi_status = (int32_t)status;
+  }
+  if (status == HAL_OK)
+  {
+    status = w5500_socket0_write_registers(
+      W5500_SOCKET0_CR_ADDRESS, &open_command, 1u);
+    g_w5500_socket0_spi_status = (int32_t)status;
+  }
+  if (status == HAL_OK)
+  {
+    status = w5500_wait_for_socket0_status(
+      W5500_SOCKET0_STATUS_INIT, W5500_SOCKET_STATE_TIMEOUT_MS);
+  }
+  if (status != HAL_OK)
+  {
+    return;
+  }
+
+  g_w5500_tcp_init_ok = 1u;
+  status = w5500_socket0_write_registers(
+    W5500_SOCKET0_CR_ADDRESS, &listen_command, 1u);
+  g_w5500_socket0_spi_status = (int32_t)status;
+
+  if (status == HAL_OK)
+  {
+    status = w5500_wait_for_socket0_status(
+      W5500_SOCKET0_STATUS_LISTEN, W5500_SOCKET_STATE_TIMEOUT_MS);
+  }
+  if (status == HAL_OK)
+  {
+    g_w5500_tcp_listen_ok = 1u;
+  }
+}
+
+static HAL_StatusTypeDef w5500_socket1_write_registers(
+  uint16_t address,
+  const uint8_t *data,
+  uint16_t length)
+{
+  uint8_t tx[W5500_COMMON_HEADER_LENGTH + W5500_SOCKET1_MAX_DATA_LENGTH];
+
+  if ((data == NULL) || (length == 0u) ||
+      (length > W5500_SOCKET1_MAX_DATA_LENGTH))
+  {
+    return HAL_ERROR;
+  }
+
+  tx[0] = (uint8_t)(address >> 8);
+  tx[1] = (uint8_t)(address & 0xffu);
+  tx[2] = W5500_SOCKET1_WRITE_VDM;
+  for (uint16_t index = 0u; index < length; index++)
+  {
+    tx[W5500_COMMON_HEADER_LENGTH + index] = data[index];
+  }
+
+  HAL_GPIO_WritePin(W5500_CS_GPIO_Port, W5500_CS_Pin, GPIO_PIN_RESET);
+  const HAL_StatusTypeDef status = HAL_SPI_Transmit(
+    &hspi2,
+    tx,
+    (uint16_t)(W5500_COMMON_HEADER_LENGTH + length),
+    W5500_SPI_TIMEOUT_MS);
+  HAL_GPIO_WritePin(W5500_CS_GPIO_Port, W5500_CS_Pin, GPIO_PIN_SET);
+
+  return status;
+}
+
+static HAL_StatusTypeDef w5500_socket1_read_register(
+  uint16_t address,
+  uint8_t *value)
+{
+  const uint8_t tx[4] = {
+    (uint8_t)(address >> 8),
+    (uint8_t)(address & 0xffu),
+    W5500_SOCKET1_READ_VDM,
+    0u
+  };
+  uint8_t rx[4] = {0u};
+
+  if (value == NULL)
+  {
+    return HAL_ERROR;
+  }
+
+  HAL_GPIO_WritePin(W5500_CS_GPIO_Port, W5500_CS_Pin, GPIO_PIN_RESET);
+  const HAL_StatusTypeDef status = HAL_SPI_TransmitReceive(
+    &hspi2, tx, rx, (uint16_t)sizeof(tx), W5500_SPI_TIMEOUT_MS);
+  HAL_GPIO_WritePin(W5500_CS_GPIO_Port, W5500_CS_Pin, GPIO_PIN_SET);
+
+  if (status == HAL_OK)
+  {
+    *value = rx[3];
+  }
+
+  return status;
+}
+
+static HAL_StatusTypeDef w5500_socket1_read_registers(
+  uint16_t address,
+  uint8_t *data,
+  uint16_t length)
+{
+  uint8_t tx[W5500_COMMON_HEADER_LENGTH + W5500_SOCKET1_MAX_DATA_LENGTH] = {0u};
+  uint8_t rx[W5500_COMMON_HEADER_LENGTH + W5500_SOCKET1_MAX_DATA_LENGTH] = {0u};
+
+  if ((data == NULL) || (length == 0u) ||
+      (length > W5500_SOCKET1_MAX_DATA_LENGTH))
+  {
+    return HAL_ERROR;
+  }
+
+  tx[0] = (uint8_t)(address >> 8);
+  tx[1] = (uint8_t)(address & 0xffu);
+  tx[2] = W5500_SOCKET1_READ_VDM;
+
+  HAL_GPIO_WritePin(W5500_CS_GPIO_Port, W5500_CS_Pin, GPIO_PIN_RESET);
+  const HAL_StatusTypeDef status = HAL_SPI_TransmitReceive(
+    &hspi2,
+    tx,
+    rx,
+    (uint16_t)(W5500_COMMON_HEADER_LENGTH + length),
+    W5500_SPI_TIMEOUT_MS);
+  HAL_GPIO_WritePin(W5500_CS_GPIO_Port, W5500_CS_Pin, GPIO_PIN_SET);
+
+  if (status == HAL_OK)
+  {
+    for (uint16_t index = 0u; index < length; index++)
+    {
+      data[index] = rx[W5500_COMMON_HEADER_LENGTH + index];
+    }
+  }
+
+  return status;
+}
+
+static HAL_StatusTypeDef w5500_socket1_read_u16(
+  uint16_t address,
+  uint16_t *value)
+{
+  uint8_t data[2] = {0u};
+
+  if (value == NULL)
+  {
+    return HAL_ERROR;
+  }
+
+  const HAL_StatusTypeDef status = w5500_socket1_read_registers(
+    address, data, (uint16_t)sizeof(data));
+  if (status == HAL_OK)
+  {
+    *value = (uint16_t)(((uint16_t)data[0] << 8) | data[1]);
+  }
+
+  return status;
+}
+
+static HAL_StatusTypeDef w5500_socket1_read_stable_u16(
+  uint16_t address,
+  uint16_t *value)
+{
+  uint16_t previous_value = 0u;
+  uint16_t current_value = 0u;
+
+  if (value == NULL)
+  {
+    return HAL_ERROR;
+  }
+
+  for (uint32_t attempt = 0u;
+       attempt < W5500_UDP_STABLE_READ_ATTEMPTS;
+       attempt++)
+  {
+    const HAL_StatusTypeDef status =
+      w5500_socket1_read_u16(address, &current_value);
+    if (status != HAL_OK)
+    {
+      return status;
+    }
+
+    if ((attempt != 0u) && (current_value == previous_value))
+    {
+      *value = current_value;
+      return HAL_OK;
+    }
+
+    previous_value = current_value;
+  }
+
+  /* Leave the caller's value unchanged if no consecutive samples agree. */
+  return HAL_TIMEOUT;
+}
+
+static HAL_StatusTypeDef w5500_socket1_write_tx_buffer(
+  uint16_t address,
+  const uint8_t *data,
+  uint16_t length)
+{
+  const uint8_t header[W5500_COMMON_HEADER_LENGTH] = {
+    (uint8_t)(address >> 8),
+    (uint8_t)(address & 0xffu),
+    W5500_SOCKET1_TX_BUFFER_WRITE_VDM
+  };
+  uint8_t header_rx[W5500_COMMON_HEADER_LENGTH] = {0u};
+
+  if ((data == NULL) || (length == 0u) ||
+      (length > PROTOCOL_MAX_FRAME_SIZE))
+  {
+    return HAL_ERROR;
+  }
+
+  HAL_GPIO_WritePin(W5500_CS_GPIO_Port, W5500_CS_Pin, GPIO_PIN_RESET);
+  HAL_StatusTypeDef status = HAL_SPI_TransmitReceive(
+    &hspi2,
+    header,
+    header_rx,
+    (uint16_t)sizeof(header),
+    W5500_SPI_TIMEOUT_MS);
+  uint16_t offset = 0u;
+  while ((status == HAL_OK) && (offset < length))
+  {
+    const uint16_t remaining = (uint16_t)(length - offset);
+    const uint16_t chunk_length = (remaining > W5500_UDP_SPI_CHUNK_SIZE) ?
+      W5500_UDP_SPI_CHUNK_SIZE : remaining;
+    status = HAL_SPI_TransmitReceive(
+      &hspi2,
+      &data[offset],
+      g_w5500_udp_spi_discard,
+      chunk_length,
+      W5500_SPI_TIMEOUT_MS);
+    offset = (uint16_t)(offset + chunk_length);
+  }
+  HAL_GPIO_WritePin(W5500_CS_GPIO_Port, W5500_CS_Pin, GPIO_PIN_SET);
+
+  return status;
+}
+
+static HAL_StatusTypeDef w5500_socket1_execute_command(uint8_t command)
+{
+  HAL_StatusTypeDef status = w5500_socket1_write_registers(
+    W5500_SOCKET1_CR_ADDRESS, &command, 1u);
+  if (status != HAL_OK)
+  {
+    return status;
+  }
+
+  const uint32_t timeout_ticks =
+    rs422_ms_to_kernel_ticks(W5500_SOCKET_COMMAND_TIMEOUT_MS);
+  const uint32_t poll_ticks =
+    rs422_ms_to_kernel_ticks(W5500_SOCKET_COMMAND_POLL_MS);
+  const uint32_t start_tick = osKernelGetTickCount();
+
+  for (;;)
+  {
+    uint8_t command_register = command;
+    status = w5500_socket1_read_register(
+      W5500_SOCKET1_CR_ADDRESS, &command_register);
+    if (status != HAL_OK)
+    {
+      return status;
+    }
+    if (command_register == 0u)
+    {
+      return HAL_OK;
+    }
+    if ((uint32_t)(osKernelGetTickCount() - start_tick) >= timeout_ticks)
+    {
+      return HAL_TIMEOUT;
+    }
+
+    (void)osDelay(poll_ticks);
+  }
+}
+
+static HAL_StatusTypeDef w5500_wait_for_socket1_status(
+  uint8_t expected_status,
+  uint32_t timeout_ms)
+{
+  const uint32_t timeout_ticks = rs422_ms_to_kernel_ticks(timeout_ms);
+  const uint32_t poll_ticks =
+    rs422_ms_to_kernel_ticks(W5500_SOCKET_STATE_POLL_MS);
+  const uint32_t start_tick = osKernelGetTickCount();
+
+  for (;;)
+  {
+    uint8_t socket_status = W5500_SOCKET1_STATUS_CLOSED;
+    const HAL_StatusTypeDef spi_status = w5500_socket1_read_register(
+      W5500_SOCKET1_SR_ADDRESS, &socket_status);
+    g_w5500_udp_socket1_spi_status = (int32_t)spi_status;
+
+    if (spi_status != HAL_OK)
+    {
+      return spi_status;
+    }
+
+    g_w5500_udp_socket1_status = socket_status;
+    if (socket_status == expected_status)
+    {
+      return HAL_OK;
+    }
+    if ((uint32_t)(osKernelGetTickCount() - start_tick) >= timeout_ticks)
+    {
+      return HAL_TIMEOUT;
+    }
+
+    (void)osDelay(poll_ticks);
+  }
+}
+
+static HAL_StatusTypeDef w5500_udp_wait_for_tx_free(
+  uint16_t required_size)
+{
+  const uint32_t timeout_ticks =
+    rs422_ms_to_kernel_ticks(W5500_UDP_TX_FREE_TIMEOUT_MS);
+  const uint32_t poll_ticks =
+    rs422_ms_to_kernel_ticks(W5500_UDP_IO_POLL_MS);
+  const uint32_t start_tick = osKernelGetTickCount();
+
+  for (;;)
+  {
+    uint16_t free_size = 0u;
+    const HAL_StatusTypeDef status = w5500_socket1_read_stable_u16(
+      W5500_SOCKET1_TX_FSR_ADDRESS, &free_size);
+    if (status != HAL_OK)
+    {
+      return status;
+    }
+    if (free_size >= required_size)
+    {
+      return HAL_OK;
+    }
+    if ((uint32_t)(osKernelGetTickCount() - start_tick) >= timeout_ticks)
+    {
+      return HAL_TIMEOUT;
+    }
+
+    (void)osDelay(poll_ticks);
+  }
+}
+
+static HAL_StatusTypeDef w5500_udp_wait_for_send_result(void)
+{
+  const uint32_t timeout_ticks =
+    rs422_ms_to_kernel_ticks(W5500_UDP_SEND_TIMEOUT_MS);
+  const uint32_t poll_ticks =
+    rs422_ms_to_kernel_ticks(W5500_UDP_IO_POLL_MS);
+  const uint32_t start_tick = osKernelGetTickCount();
+
+  for (;;)
+  {
+    uint8_t socket_interrupt = 0u;
+    HAL_StatusTypeDef status = w5500_socket1_read_register(
+      W5500_SOCKET1_IR_ADDRESS, &socket_interrupt);
+    if (status != HAL_OK)
+    {
+      return status;
+    }
+
+    const uint8_t send_result = (uint8_t)(socket_interrupt &
+      (W5500_SOCKET1_IR_SEND_OK | W5500_SOCKET1_IR_TIMEOUT));
+    if (send_result != 0u)
+    {
+      status = w5500_socket1_write_registers(
+        W5500_SOCKET1_IR_ADDRESS, &send_result, 1u);
+      if (status != HAL_OK)
+      {
+        return status;
+      }
+
+      if ((send_result & W5500_SOCKET1_IR_TIMEOUT) != 0u)
+      {
+        return HAL_TIMEOUT;
+      }
+      return HAL_OK;
+    }
+
+    if ((uint32_t)(osKernelGetTickCount() - start_tick) >= timeout_ticks)
+    {
+      return HAL_TIMEOUT;
+    }
+
+    (void)osDelay(poll_ticks);
+  }
+}
+
+static HAL_StatusTypeDef w5500_udp_send_frame(
+  const uint8_t *frame,
+  uint16_t frame_length)
+{
+  if ((frame == NULL) || (frame_length == 0u) ||
+      (frame_length > PROTOCOL_MAX_FRAME_SIZE))
+  {
+    return HAL_ERROR;
+  }
+
+  HAL_StatusTypeDef status = w5500_udp_wait_for_tx_free(frame_length);
+  if (status != HAL_OK)
+  {
+    return status;
+  }
+
+  uint16_t tx_write_pointer = 0u;
+  status = w5500_socket1_read_u16(
+    W5500_SOCKET1_TX_WR_ADDRESS, &tx_write_pointer);
+  if (status != HAL_OK)
+  {
+    return status;
+  }
+
+  status = w5500_socket1_write_tx_buffer(
+    tx_write_pointer, frame, frame_length);
+  if (status != HAL_OK)
+  {
+    return status;
+  }
+
+  const uint16_t new_tx_write_pointer =
+    (uint16_t)(tx_write_pointer + frame_length);
+  const uint8_t tx_write_pointer_bytes[2] = {
+    (uint8_t)(new_tx_write_pointer >> 8),
+    (uint8_t)(new_tx_write_pointer & 0xffu)
+  };
+  status = w5500_socket1_write_registers(
+    W5500_SOCKET1_TX_WR_ADDRESS,
+    tx_write_pointer_bytes,
+    (uint16_t)sizeof(tx_write_pointer_bytes));
+  if (status != HAL_OK)
+  {
+    return status;
+  }
+
+  /* Sn_IR is write-one-to-clear. Remove stale SEND result before SEND. */
+  const uint8_t stale_send_bits =
+    W5500_SOCKET1_IR_SEND_OK | W5500_SOCKET1_IR_TIMEOUT;
+  status = w5500_socket1_write_registers(
+    W5500_SOCKET1_IR_ADDRESS, &stale_send_bits, 1u);
+  if (status != HAL_OK)
+  {
+    return status;
+  }
+
+  status = w5500_socket1_execute_command(W5500_SOCKET1_SEND_COMMAND);
+  if (status != HAL_OK)
+  {
+    return status;
+  }
+
+  return w5500_udp_wait_for_send_result();
+}
+
+static HAL_StatusTypeDef w5500_start_udp_socket(void)
+{
+  const uint8_t udp_mode = W5500_SOCKET1_UDP_MODE;
+  const uint8_t local_port[2] = {
+    (uint8_t)(W5500_UDP_LOCAL_PORT >> 8),
+    (uint8_t)(W5500_UDP_LOCAL_PORT & 0xffu)
+  };
+  const uint8_t destination_port[2] = {
+    (uint8_t)(W5500_UDP_DESTINATION_PORT >> 8),
+    (uint8_t)(W5500_UDP_DESTINATION_PORT & 0xffu)
+  };
+
+  HAL_StatusTypeDef status = w5500_socket1_write_registers(
+    W5500_SOCKET1_MR_ADDRESS, &udp_mode, 1u);
+  if (status == HAL_OK)
+  {
+    status = w5500_socket1_write_registers(
+      W5500_SOCKET1_PORT_ADDRESS,
+      local_port,
+      (uint16_t)sizeof(local_port));
+  }
+  if (status == HAL_OK)
+  {
+    status = w5500_socket1_execute_command(W5500_SOCKET1_OPEN_COMMAND);
+  }
+  if (status == HAL_OK)
+  {
+    status = w5500_wait_for_socket1_status(
+      W5500_SOCKET1_STATUS_UDP, W5500_SOCKET_STATE_TIMEOUT_MS);
+  }
+  if (status == HAL_OK)
+  {
+    status = w5500_socket1_write_registers(
+      W5500_SOCKET1_DIPR_ADDRESS,
+      g_w5500_udp_destination_ip,
+      (uint16_t)sizeof(g_w5500_udp_destination_ip));
+  }
+  if (status == HAL_OK)
+  {
+    status = w5500_socket1_write_registers(
+      W5500_SOCKET1_DPORT_ADDRESS,
+      destination_port,
+      (uint16_t)sizeof(destination_port));
+  }
+
+  return status;
+}
+
+static uint32_t w5500_kernel_uptime_ms(void)
+{
+  const uint32_t tick_frequency = osKernelGetTickFreq();
+  if (tick_frequency == 0u)
+  {
+    return 0u;
+  }
+
+  return (uint32_t)(((uint64_t)osKernelGetTickCount() * 1000u) /
+                    tick_frequency);
+}
+
+static void w5500_udp_send_telemetry(void)
+{
+  const uint16_t sequence = g_w5500_udp_next_seq;
+  const uint32_t uptime_ms = w5500_kernel_uptime_ms();
+
+  g_udp_telemetry_packet.version = PROTOCOL_VERSION;
+  g_udp_telemetry_packet.msg_id = MSG_TELEMETRY;
+  g_udp_telemetry_packet.seq = sequence;
+  g_udp_telemetry_packet.length = W5500_UDP_PAYLOAD_LENGTH;
+  g_udp_telemetry_packet.payload[0] = (uint8_t)(uptime_ms >> 24);
+  g_udp_telemetry_packet.payload[1] = (uint8_t)(uptime_ms >> 16);
+  g_udp_telemetry_packet.payload[2] = (uint8_t)(uptime_ms >> 8);
+  g_udp_telemetry_packet.payload[3] = (uint8_t)(uptime_ms & 0xffu);
+  g_udp_telemetry_packet.payload[4] = 0u;
+  g_udp_telemetry_packet.payload[5] = 0u;
+
+  size_t encoded_length = 0u;
+  const protocol_result_t encode_status = protocol_encode(
+    &g_udp_telemetry_packet,
+    g_w5500_udp_tx_frame,
+    sizeof(g_w5500_udp_tx_frame),
+    &encoded_length);
+  if ((encode_status != PROTO_OK) || (encoded_length == 0u) ||
+      (encoded_length > UINT16_MAX))
+  {
+    g_w5500_udp_last_tx_status = (int32_t)encode_status;
+    g_w5500_udp_tx_error_count++;
+    return;
+  }
+
+  const HAL_StatusTypeDef send_status = w5500_udp_send_frame(
+    g_w5500_udp_tx_frame, (uint16_t)encoded_length);
+  g_w5500_udp_last_tx_status = (int32_t)send_status;
+  g_w5500_udp_socket1_spi_status = (int32_t)send_status;
+
+  if (send_status == HAL_OK)
+  {
+    g_w5500_udp_tx_packet_count++;
+    g_w5500_udp_tx_bytes += (uint32_t)encoded_length;
+    g_w5500_udp_last_tx_seq = sequence;
+    g_w5500_udp_next_seq = (uint16_t)(sequence + 1u);
+  }
+  else
+  {
+    g_w5500_udp_tx_error_count++;
+  }
 }
 
 static void rs422_rx_ring_push_from_isr(uint8_t byte)
@@ -1022,10 +2522,87 @@ void StartEthernetTask(void *argument)
   /* USER CODE BEGIN StartEthernetTask */
   uint8_t version = 0u;
 
+  g_w5500_net_config_ok = 0u;
+  g_w5500_net_readback_ok = 0u;
+  g_w5500_net_write_status = -1;
+  g_w5500_net_read_status = -1;
+  g_w5500_tcp_init_ok = 0u;
+  g_w5500_tcp_listen_ok = 0u;
+  g_w5500_socket0_status = W5500_SOCKET0_STATUS_CLOSED;
+  g_w5500_socket0_spi_status = -1;
+  g_w5500_tcp_rx_bytes = 0u;
+  g_w5500_tcp_tx_bytes = 0u;
+  g_w5500_tcp_valid_frame_count = 0u;
+  g_w5500_tcp_ping_count = 0u;
+  g_w5500_tcp_pong_count = 0u;
+  g_w5500_tcp_last_rx_msg_id = 0u;
+  g_w5500_tcp_last_rx_seq = 0u;
+  g_w5500_tcp_last_tx_seq = 0u;
+  g_w5500_tcp_rx_error_count = 0u;
+  g_w5500_tcp_tx_error_count = 0u;
+  g_w5500_tcp_last_rx_status = -1;
+  g_w5500_tcp_last_tx_status = -1;
+  g_w5500_udp_open_ok = 0u;
+  g_w5500_udp_socket1_status = W5500_SOCKET1_STATUS_CLOSED;
+  g_w5500_udp_socket1_spi_status = -1;
+  g_w5500_udp_tx_packet_count = 0u;
+  g_w5500_udp_tx_bytes = 0u;
+  g_w5500_udp_tx_error_count = 0u;
+  g_w5500_udp_last_tx_seq = 0u;
+  g_w5500_udp_last_tx_status = -1;
+  g_w5500_udp_next_seq = 1u;
+  stream_parser_init(&g_tcp_parser);
+  for (uint16_t index = 0u; index < W5500_GAR_LENGTH; index++)
+  {
+    g_w5500_gar_readback[index] = 0u;
+    g_w5500_subr_readback[index] = 0u;
+    g_w5500_sipr_readback[index] = 0u;
+  }
+  for (uint16_t index = 0u; index < W5500_SHAR_LENGTH; index++)
+  {
+    g_w5500_shar_readback[index] = 0u;
+  }
+
   w5500_hardware_reset();
   const HAL_StatusTypeDef status = w5500_read_version(&version);
   g_w5500_version = version;
   g_w5500_spi_status = (int32_t)status;
+
+  if ((status == HAL_OK) && (version == 0x04u))
+  {
+    const HAL_StatusTypeDef write_status = w5500_write_network_config();
+    g_w5500_net_write_status = (int32_t)write_status;
+
+    if (write_status == HAL_OK)
+    {
+      g_w5500_net_config_ok = 1u;
+      const HAL_StatusTypeDef read_status = w5500_read_network_config();
+      g_w5500_net_read_status = (int32_t)read_status;
+
+      if ((read_status == HAL_OK) &&
+          (w5500_network_readback_matches() != 0u))
+      {
+        g_w5500_net_readback_ok = 1u;
+      }
+    }
+  }
+
+  if ((g_w5500_net_config_ok != 0u) &&
+      (g_w5500_net_readback_ok != 0u))
+  {
+    w5500_start_tcp_server();
+  }
+
+  if ((g_w5500_net_config_ok != 0u) &&
+      (g_w5500_net_readback_ok != 0u))
+  {
+    const HAL_StatusTypeDef udp_open_status = w5500_start_udp_socket();
+    g_w5500_udp_socket1_spi_status = (int32_t)udp_open_status;
+    if (udp_open_status == HAL_OK)
+    {
+      g_w5500_udp_open_ok = 1u;
+    }
+  }
 
   const uint32_t phy_period_ticks =
     rs422_ms_to_kernel_ticks(W5500_PHY_POLL_PERIOD_MS);
@@ -1044,6 +2621,48 @@ void StartEthernetTask(void *argument)
       g_w5500_link_up = ((phycfgr & W5500_PHYCFGR_LNK) != 0u) ? 1u : 0u;
     }
     g_w5500_phy_spi_status = (int32_t)phy_status;
+
+    if (g_w5500_tcp_listen_ok != 0u)
+    {
+      uint8_t socket_status = W5500_SOCKET0_STATUS_CLOSED;
+      const HAL_StatusTypeDef socket_spi_status =
+        w5500_socket0_read_register(
+          W5500_SOCKET0_SR_ADDRESS, &socket_status);
+      g_w5500_socket0_spi_status = (int32_t)socket_spi_status;
+
+      if (socket_spi_status == HAL_OK)
+      {
+        g_w5500_socket0_status = socket_status;
+        if (socket_status == W5500_SOCKET0_STATUS_ESTABLISHED)
+        {
+          const HAL_StatusTypeDef rx_status = w5500_tcp_process_rx();
+          g_w5500_tcp_last_rx_status = (int32_t)rx_status;
+          if (rx_status != HAL_OK)
+          {
+            g_w5500_tcp_rx_error_count++;
+          }
+        }
+      }
+    }
+
+    if (g_w5500_udp_open_ok != 0u)
+    {
+      uint8_t udp_socket_status = W5500_SOCKET1_STATUS_CLOSED;
+      const HAL_StatusTypeDef udp_socket_spi_status =
+        w5500_socket1_read_register(
+          W5500_SOCKET1_SR_ADDRESS, &udp_socket_status);
+      g_w5500_udp_socket1_spi_status = (int32_t)udp_socket_spi_status;
+
+      if (udp_socket_spi_status == HAL_OK)
+      {
+        g_w5500_udp_socket1_status = udp_socket_status;
+        if ((udp_socket_status == W5500_SOCKET1_STATUS_UDP) &&
+            (g_w5500_link_up != 0u))
+        {
+          w5500_udp_send_telemetry();
+        }
+      }
+    }
 
     next_phy_tick += phy_period_ticks;
     if (osDelayUntil(next_phy_tick) != osOK)
