@@ -58,8 +58,10 @@ typedef enum
 #define RS422_EVENT_RX                     (1UL << 0)
 #define RS422_EVENT_TX_DONE                (1UL << 1)
 #define RS422_EVENT_CMD_READY              (1UL << 2)
+#define RS422_EVENT_TCP_CONTEXT_RESET      (1UL << 3)
 #define RS422_EVENT_MASK                   (RS422_EVENT_RX | RS422_EVENT_TX_DONE | \
-                                            RS422_EVENT_CMD_READY)
+                                            RS422_EVENT_CMD_READY | \
+                                            RS422_EVENT_TCP_CONTEXT_RESET)
 #define RS422_RX_RING_CAPACITY             512u
 #define RS422_RX_RING_MASK                 (RS422_RX_RING_CAPACITY - 1u)
 #define RS422_CMD_QUEUE_DEPTH              8u
@@ -104,6 +106,8 @@ typedef enum
 #define W5500_SOCKET0_TCP_MODE             0x01u
 #define W5500_SOCKET0_OPEN_COMMAND         0x01u
 #define W5500_SOCKET0_LISTEN_COMMAND       0x02u
+#define W5500_SOCKET0_DISCON_COMMAND       0x08u
+#define W5500_SOCKET0_CLOSE_COMMAND        0x10u
 #define W5500_SOCKET0_SEND_COMMAND         0x20u
 #define W5500_SOCKET0_RECV_COMMAND         0x40u
 #define W5500_SOCKET0_IR_SEND_OK           0x10u
@@ -111,10 +115,19 @@ typedef enum
 #define W5500_SOCKET0_STATUS_CLOSED        0x00u
 #define W5500_SOCKET0_STATUS_INIT          0x13u
 #define W5500_SOCKET0_STATUS_LISTEN        0x14u
+#define W5500_SOCKET0_STATUS_SYNSENT       0x15u
+#define W5500_SOCKET0_STATUS_SYNRECV       0x16u
 #define W5500_SOCKET0_STATUS_ESTABLISHED   0x17u
+#define W5500_SOCKET0_STATUS_FIN_WAIT      0x18u
+#define W5500_SOCKET0_STATUS_CLOSING       0x1au
+#define W5500_SOCKET0_STATUS_TIME_WAIT     0x1bu
+#define W5500_SOCKET0_STATUS_CLOSE_WAIT    0x1cu
+#define W5500_SOCKET0_STATUS_LAST_ACK      0x1du
 #define W5500_TCP_SERVER_PORT              5000u
 #define W5500_SOCKET_STATE_TIMEOUT_MS      1000u
 #define W5500_SOCKET_STATE_POLL_MS         10u
+#define W5500_TCP_TRANSIENT_TIMEOUT_MS     3000u
+#define W5500_TCP_RECOVERY_RETRY_MS        500u
 #define W5500_TCP_STABLE_READ_ATTEMPTS     8u
 #define W5500_TCP_RX_CHUNK_SIZE            64u
 #define W5500_TCP_TX_FREE_TIMEOUT_MS       1000u
@@ -240,6 +253,8 @@ static volatile int32_t g_w5500_spi_status = -1;
 /* Retain the last successful PHY sample on error; always check PHY SPI status. */
 static volatile uint8_t g_w5500_phycfgr = 0u;
 static volatile uint32_t g_w5500_link_up = 0u;
+static volatile uint32_t g_w5500_link_down_count = 0u;
+static volatile uint32_t g_w5500_link_recovery_count = 0u;
 static volatile int32_t g_w5500_phy_spi_status = -1;
 static volatile uint32_t g_w5500_net_config_ok = 0u;
 static volatile uint32_t g_w5500_net_readback_ok = 0u;
@@ -278,6 +293,12 @@ static volatile uint32_t g_w5500_tcp_rx_error_count = 0u;
 static volatile uint32_t g_w5500_tcp_tx_error_count = 0u;
 static volatile int32_t g_w5500_tcp_last_rx_status = -1;
 static volatile int32_t g_w5500_tcp_last_tx_status = -1;
+static volatile uint32_t g_w5500_tcp_recovery_pending = 0u;
+static volatile uint32_t g_w5500_tcp_recovery_attempt_count = 0u;
+static volatile uint32_t g_w5500_tcp_recovery_success_count = 0u;
+static volatile uint32_t g_w5500_tcp_recovery_fail_count = 0u;
+static volatile uint32_t g_w5500_tcp_session_active = 0u;
+static volatile uint32_t g_w5500_tcp_stale_response_drop_count = 0u;
 static volatile uint32_t g_w5500_udp_open_ok = 0u;
 static volatile uint8_t g_w5500_udp_socket1_status = W5500_SOCKET1_STATUS_CLOSED;
 static volatile int32_t g_w5500_udp_socket1_spi_status = -1;
@@ -341,6 +362,7 @@ static uint32_t rs422_ms_to_kernel_ticks(uint32_t time_ms);
 static uint32_t rs422_process_rx_buffer(
   uint16_t expected_pong_sequence,
   uint32_t match_pong);
+static void rs422_handle_tcp_context_reset_event(uint32_t flags);
 static void rs422_handle_tx_done_event(uint32_t flags);
 static int32_t rs422_wait_for_tx_complete(
   uint16_t expected_pong_sequence,
@@ -400,7 +422,12 @@ static HAL_StatusTypeDef w5500_tcp_process_rx(void);
 static HAL_StatusTypeDef w5500_wait_for_socket0_status(
   uint8_t expected_status,
   uint32_t timeout_ms);
-static void w5500_start_tcp_server(void);
+static HAL_StatusTypeDef w5500_listen_tcp_server(void);
+static HAL_StatusTypeDef w5500_start_tcp_server(void);
+static HAL_StatusTypeDef w5500_restart_tcp_server(void);
+static uint32_t w5500_tcp_is_transient_state(uint8_t socket_status);
+static void w5500_tcp_invalidate_connection_context(void);
+static void w5500_tcp_discard_stale_responses(void);
 static HAL_StatusTypeDef w5500_socket1_write_registers(
   uint16_t address,
   const uint8_t *data,
@@ -1221,15 +1248,37 @@ static HAL_StatusTypeDef w5500_wait_for_socket0_status(
   }
 }
 
-static void w5500_start_tcp_server(void)
+static HAL_StatusTypeDef w5500_listen_tcp_server(void)
+{
+  HAL_StatusTypeDef status = w5500_socket0_execute_command(
+    W5500_SOCKET0_LISTEN_COMMAND);
+  g_w5500_socket0_spi_status = (int32_t)status;
+
+  if (status == HAL_OK)
+  {
+    status = w5500_wait_for_socket0_status(
+      W5500_SOCKET0_STATUS_LISTEN, W5500_SOCKET_STATE_TIMEOUT_MS);
+  }
+
+  g_w5500_socket0_spi_status = (int32_t)status;
+  if (status == HAL_OK)
+  {
+    g_w5500_tcp_listen_ok = 1u;
+  }
+
+  return status;
+}
+
+static HAL_StatusTypeDef w5500_start_tcp_server(void)
 {
   const uint8_t tcp_mode = W5500_SOCKET0_TCP_MODE;
   const uint8_t server_port[2] = {
     (uint8_t)(W5500_TCP_SERVER_PORT >> 8),
     (uint8_t)(W5500_TCP_SERVER_PORT & 0xffu)
   };
-  const uint8_t open_command = W5500_SOCKET0_OPEN_COMMAND;
-  const uint8_t listen_command = W5500_SOCKET0_LISTEN_COMMAND;
+
+  g_w5500_tcp_init_ok = 0u;
+  g_w5500_tcp_listen_ok = 0u;
 
   HAL_StatusTypeDef status = w5500_socket0_write_registers(
     W5500_SOCKET0_MR_ADDRESS, &tcp_mode, 1u);
@@ -1243,8 +1292,7 @@ static void w5500_start_tcp_server(void)
   }
   if (status == HAL_OK)
   {
-    status = w5500_socket0_write_registers(
-      W5500_SOCKET0_CR_ADDRESS, &open_command, 1u);
+    status = w5500_socket0_execute_command(W5500_SOCKET0_OPEN_COMMAND);
     g_w5500_socket0_spi_status = (int32_t)status;
   }
   if (status == HAL_OK)
@@ -1254,22 +1302,91 @@ static void w5500_start_tcp_server(void)
   }
   if (status != HAL_OK)
   {
-    return;
+    g_w5500_socket0_spi_status = (int32_t)status;
+    return status;
   }
 
   g_w5500_tcp_init_ok = 1u;
-  status = w5500_socket0_write_registers(
-    W5500_SOCKET0_CR_ADDRESS, &listen_command, 1u);
+  status = w5500_listen_tcp_server();
+  return status;
+}
+
+static void w5500_tcp_discard_stale_responses(void)
+{
+  if (tcp_response_queue == NULL)
+  {
+    return;
+  }
+
+  for (uint32_t index = 0u; index < TCP_RESPONSE_QUEUE_DEPTH; index++)
+  {
+    if (osMessageQueueGet(
+          tcp_response_queue,
+          &g_tcp_pong_packet,
+          NULL,
+          0u) != osOK)
+    {
+      break;
+    }
+
+    g_w5500_tcp_stale_response_drop_count++;
+  }
+}
+
+static void w5500_tcp_invalidate_connection_context(void)
+{
+  g_w5500_tcp_session_active = 0u;
+  __DMB();
+  stream_parser_init(&g_tcp_parser);
+
+  if (RS422TaskHandle != NULL)
+  {
+    (void)osThreadFlagsSet(
+      RS422TaskHandle, RS422_EVENT_TCP_CONTEXT_RESET);
+  }
+
+  w5500_tcp_discard_stale_responses();
+}
+
+static HAL_StatusTypeDef w5500_restart_tcp_server(void)
+{
+  g_w5500_tcp_init_ok = 0u;
+  g_w5500_tcp_listen_ok = 0u;
+  w5500_tcp_invalidate_connection_context();
+
+  HAL_StatusTypeDef status = w5500_socket0_execute_command(
+    W5500_SOCKET0_CLOSE_COMMAND);
   g_w5500_socket0_spi_status = (int32_t)status;
 
   if (status == HAL_OK)
   {
     status = w5500_wait_for_socket0_status(
-      W5500_SOCKET0_STATUS_LISTEN, W5500_SOCKET_STATE_TIMEOUT_MS);
+      W5500_SOCKET0_STATUS_CLOSED, W5500_SOCKET_STATE_TIMEOUT_MS);
   }
   if (status == HAL_OK)
   {
-    g_w5500_tcp_listen_ok = 1u;
+    status = w5500_start_tcp_server();
+  }
+
+  g_w5500_socket0_spi_status = (int32_t)status;
+  w5500_tcp_discard_stale_responses();
+  return status;
+}
+
+static uint32_t w5500_tcp_is_transient_state(uint8_t socket_status)
+{
+  switch (socket_status)
+  {
+    case W5500_SOCKET0_STATUS_SYNSENT:
+    case W5500_SOCKET0_STATUS_SYNRECV:
+    case W5500_SOCKET0_STATUS_FIN_WAIT:
+    case W5500_SOCKET0_STATUS_CLOSING:
+    case W5500_SOCKET0_STATUS_TIME_WAIT:
+    case W5500_SOCKET0_STATUS_LAST_ACK:
+      return 1u;
+
+    default:
+      return 0u;
   }
 }
 
@@ -1937,6 +2054,7 @@ static uint32_t rs422_process_rx_buffer(
       }
 
       if ((g_rs422_received_packet.msg_id == MSG_PONG) &&
+          (g_w5500_tcp_session_active != 0u) &&
           (g_rs422_tcp_ping_pending != 0u) &&
           (g_rs422_received_packet.seq == g_rs422_tcp_ping_pending_seq))
       {
@@ -1961,6 +2079,15 @@ static uint32_t rs422_process_rx_buffer(
   }
 
   return matching_pong_received;
+}
+
+static void rs422_handle_tcp_context_reset_event(uint32_t flags)
+{
+  if ((flags & RS422_EVENT_TCP_CONTEXT_RESET) != 0u)
+  {
+    g_rs422_tcp_ping_pending = 0u;
+    g_rs422_tcp_ping_pending_seq = 0u;
+  }
 }
 
 static void rs422_handle_tx_done_event(uint32_t flags)
@@ -2001,6 +2128,7 @@ static int32_t rs422_wait_for_tx_complete(
 
     if ((pending_flags & osFlagsError) == 0u)
     {
+      rs422_handle_tcp_context_reset_event(pending_flags);
       rs422_handle_tx_done_event(pending_flags);
     }
     else if (pending_flags != osFlagsErrorResource)
@@ -2042,6 +2170,7 @@ static int32_t rs422_wait_for_tx_complete(
       return RS422_PING_TEST_TX_FAILURE;
     }
 
+    rs422_handle_tcp_context_reset_event(flags);
     rs422_handle_tx_done_event(flags);
   }
 
@@ -2154,6 +2283,7 @@ static int32_t rs422_ping_bringup_test(uint16_t sequence)
       return RS422_PING_TEST_RX_FAILURE;
     }
 
+    rs422_handle_tcp_context_reset_event(flags);
     rs422_handle_tx_done_event(flags);
   }
 
@@ -2241,7 +2371,8 @@ static int32_t rs422_forward_packet(const protocol_packet_t *packet)
     return RS422_PING_TEST_TX_FAILURE;
   }
 
-  if (packet->msg_id == MSG_PING)
+  if ((packet->msg_id == MSG_PING) &&
+      (g_w5500_tcp_session_active != 0u))
   {
     g_rs422_tcp_ping_pending_seq = packet->seq;
     __DMB();
@@ -2260,6 +2391,7 @@ static int32_t rs422_forward_packet(const protocol_packet_t *packet)
     if (packet->msg_id == MSG_PING)
     {
       g_rs422_tcp_ping_pending = 0u;
+      g_rs422_tcp_ping_pending_seq = 0u;
     }
 
     if (tx_status == HAL_BUSY)
@@ -2284,6 +2416,7 @@ static int32_t rs422_forward_packet(const protocol_packet_t *packet)
     if (packet->msg_id == MSG_PING)
     {
       g_rs422_tcp_ping_pending = 0u;
+      g_rs422_tcp_ping_pending_seq = 0u;
     }
     return RS422_PING_TEST_TX_FAILURE;
   }
@@ -2753,6 +2886,7 @@ void StartRS422Task(void *argument)
 
     if ((flags & osFlagsError) == 0u)
     {
+      rs422_handle_tcp_context_reset_event(flags);
       rs422_handle_tx_done_event(flags);
     }
     else
@@ -2774,6 +2908,8 @@ void StartEthernetTask(void *argument)
 {
   /* USER CODE BEGIN StartEthernetTask */
   uint8_t version = 0u;
+  /* Boot/startup and normal socket lifecycle retries are not link recovery. */
+  uint32_t tcp_lifecycle_restart_pending = 0u;
 
   g_w5500_net_config_ok = 0u;
   g_w5500_net_readback_ok = 0u;
@@ -2796,6 +2932,16 @@ void StartEthernetTask(void *argument)
   g_w5500_tcp_tx_error_count = 0u;
   g_w5500_tcp_last_rx_status = -1;
   g_w5500_tcp_last_tx_status = -1;
+  g_w5500_phycfgr = 0u;
+  g_w5500_link_up = 0u;
+  g_w5500_link_down_count = 0u;
+  g_w5500_link_recovery_count = 0u;
+  g_w5500_tcp_recovery_pending = 0u;
+  g_w5500_tcp_recovery_attempt_count = 0u;
+  g_w5500_tcp_recovery_success_count = 0u;
+  g_w5500_tcp_recovery_fail_count = 0u;
+  g_w5500_tcp_session_active = 0u;
+  g_w5500_tcp_stale_response_drop_count = 0u;
   g_rs422_cmd_enqueue_success_count = 0u;
   g_rs422_cmd_enqueue_fail_count = 0u;
   g_tcp_response_dequeue_count = 0u;
@@ -2848,7 +2994,10 @@ void StartEthernetTask(void *argument)
   if ((g_w5500_net_config_ok != 0u) &&
       (g_w5500_net_readback_ok != 0u))
   {
-    w5500_start_tcp_server();
+    if (w5500_start_tcp_server() != HAL_OK)
+    {
+      tcp_lifecycle_restart_pending = 1u;
+    }
   }
 
   if ((g_w5500_net_config_ok != 0u) &&
@@ -2864,7 +3013,19 @@ void StartEthernetTask(void *argument)
 
   const uint32_t phy_period_ticks =
     rs422_ms_to_kernel_ticks(W5500_PHY_POLL_PERIOD_MS);
+  const uint32_t tcp_transient_timeout_ticks =
+    rs422_ms_to_kernel_ticks(W5500_TCP_TRANSIENT_TIMEOUT_MS);
+  const uint32_t tcp_recovery_retry_ticks =
+    rs422_ms_to_kernel_ticks(W5500_TCP_RECOVERY_RETRY_MS);
   uint32_t next_phy_tick = osKernelGetTickCount();
+  uint32_t next_tcp_restart_tick = next_phy_tick;
+  uint32_t socket_state_enter_tick = next_phy_tick;
+  uint32_t phy_link_state_initialized = 0u;
+  uint32_t phy_link_was_established = 0u;
+  uint32_t previous_link_up = 0u;
+  uint32_t socket_state_initialized = 0u;
+  uint32_t graceful_disconnect_pending = 0u;
+  uint8_t previous_socket_status = W5500_SOCKET0_STATUS_CLOSED;
 
   /* Infinite loop */
   for(;;)
@@ -2875,12 +3036,59 @@ void StartEthernetTask(void *argument)
 
     if (phy_status == HAL_OK)
     {
+      const uint32_t current_link_up =
+        ((phycfgr & W5500_PHYCFGR_LNK) != 0u) ? 1u : 0u;
+
       g_w5500_phycfgr = phycfgr;
-      g_w5500_link_up = ((phycfgr & W5500_PHYCFGR_LNK) != 0u) ? 1u : 0u;
+      g_w5500_link_up = current_link_up;
+
+      if (phy_link_state_initialized == 0u)
+      {
+        phy_link_state_initialized = 1u;
+        previous_link_up = current_link_up;
+
+        if (current_link_up != 0u)
+        {
+          phy_link_was_established = 1u;
+        }
+      }
+      else if (current_link_up != previous_link_up)
+      {
+        if (current_link_up == 0u)
+        {
+          if (phy_link_was_established != 0u)
+          {
+            g_w5500_link_down_count++;
+            g_w5500_tcp_recovery_pending = 1u;
+            g_w5500_tcp_init_ok = 0u;
+            g_w5500_tcp_listen_ok = 0u;
+            tcp_lifecycle_restart_pending = 0u;
+            graceful_disconnect_pending = 0u;
+            socket_state_initialized = 0u;
+            w5500_tcp_invalidate_connection_context();
+          }
+        }
+        else
+        {
+          if (phy_link_was_established == 0u)
+          {
+            phy_link_was_established = 1u;
+            next_tcp_restart_tick = osKernelGetTickCount();
+          }
+          else if (g_w5500_tcp_recovery_pending != 0u)
+          {
+            g_w5500_link_recovery_count++;
+            next_tcp_restart_tick = osKernelGetTickCount();
+          }
+        }
+
+        previous_link_up = current_link_up;
+      }
     }
     g_w5500_phy_spi_status = (int32_t)phy_status;
 
-    if (g_w5500_tcp_listen_ok != 0u)
+    if ((g_w5500_net_config_ok != 0u) &&
+        (g_w5500_net_readback_ok != 0u))
     {
       uint8_t socket_status = W5500_SOCKET0_STATUS_CLOSED;
       const HAL_StatusTypeDef socket_spi_status =
@@ -2890,25 +3098,211 @@ void StartEthernetTask(void *argument)
 
       if (socket_spi_status == HAL_OK)
       {
+        const uint32_t current_tick = osKernelGetTickCount();
         g_w5500_socket0_status = socket_status;
-        if (socket_status == W5500_SOCKET0_STATUS_ESTABLISHED)
-        {
-          const HAL_StatusTypeDef rx_status = w5500_tcp_process_rx();
-          g_w5500_tcp_last_rx_status = (int32_t)rx_status;
-          if (rx_status != HAL_OK)
-          {
-            g_w5500_tcp_rx_error_count++;
-          }
 
-          if ((tcp_response_queue != NULL) &&
-              (osMessageQueueGet(
-                 tcp_response_queue,
-                 &g_tcp_pong_packet,
-                 NULL,
-                 0u) == osOK))
+        if ((socket_state_initialized == 0u) ||
+            (socket_status != previous_socket_status))
+        {
+          socket_state_initialized = 1u;
+          previous_socket_status = socket_status;
+          socket_state_enter_tick = current_tick;
+        }
+
+        if ((socket_status != W5500_SOCKET0_STATUS_ESTABLISHED) &&
+            (g_w5500_tcp_session_active != 0u))
+        {
+          g_w5500_tcp_init_ok = 0u;
+          g_w5500_tcp_listen_ok = 0u;
+          w5500_tcp_invalidate_connection_context();
+        }
+
+        if (g_w5500_link_up != 0u)
+        {
+          if (g_w5500_tcp_recovery_pending != 0u)
           {
-            g_tcp_response_dequeue_count++;
-            w5500_tcp_send_response_packet(&g_tcp_pong_packet);
+            if ((int32_t)(current_tick - next_tcp_restart_tick) >= 0)
+            {
+              g_w5500_tcp_recovery_attempt_count++;
+              const HAL_StatusTypeDef recovery_status =
+                w5500_restart_tcp_server();
+
+              if (recovery_status == HAL_OK)
+              {
+                g_w5500_tcp_recovery_pending = 0u;
+                g_w5500_tcp_recovery_success_count++;
+                tcp_lifecycle_restart_pending = 0u;
+                graceful_disconnect_pending = 0u;
+                socket_state_initialized = 1u;
+                previous_socket_status = W5500_SOCKET0_STATUS_LISTEN;
+                socket_state_enter_tick = osKernelGetTickCount();
+              }
+              else
+              {
+                g_w5500_tcp_recovery_fail_count++;
+                next_tcp_restart_tick =
+                  osKernelGetTickCount() + tcp_recovery_retry_ticks;
+                socket_state_initialized = 0u;
+              }
+            }
+          }
+          else if (tcp_lifecycle_restart_pending != 0u)
+          {
+            if ((int32_t)(current_tick - next_tcp_restart_tick) >= 0)
+            {
+              const HAL_StatusTypeDef restart_status =
+                w5500_restart_tcp_server();
+
+              if (restart_status == HAL_OK)
+              {
+                tcp_lifecycle_restart_pending = 0u;
+                graceful_disconnect_pending = 0u;
+                socket_state_initialized = 1u;
+                previous_socket_status = W5500_SOCKET0_STATUS_LISTEN;
+                socket_state_enter_tick = osKernelGetTickCount();
+              }
+              else
+              {
+                next_tcp_restart_tick =
+                  osKernelGetTickCount() + tcp_recovery_retry_ticks;
+                socket_state_initialized = 0u;
+              }
+            }
+          }
+          else
+          {
+            switch (socket_status)
+            {
+              case W5500_SOCKET0_STATUS_ESTABLISHED:
+                graceful_disconnect_pending = 0u;
+                if (g_w5500_tcp_session_active == 0u)
+                {
+                  stream_parser_init(&g_tcp_parser);
+                  w5500_tcp_discard_stale_responses();
+                  __DMB();
+                  g_w5500_tcp_session_active = 1u;
+                }
+
+                {
+                  const HAL_StatusTypeDef rx_status =
+                    w5500_tcp_process_rx();
+                  g_w5500_tcp_last_rx_status = (int32_t)rx_status;
+                  if (rx_status != HAL_OK)
+                  {
+                    g_w5500_tcp_rx_error_count++;
+                  }
+                }
+
+                if ((tcp_response_queue != NULL) &&
+                    (osMessageQueueGet(
+                       tcp_response_queue,
+                       &g_tcp_pong_packet,
+                       NULL,
+                       0u) == osOK))
+                {
+                  g_tcp_response_dequeue_count++;
+                  w5500_tcp_send_response_packet(&g_tcp_pong_packet);
+                }
+                break;
+
+              case W5500_SOCKET0_STATUS_CLOSE_WAIT:
+                if (graceful_disconnect_pending == 0u)
+                {
+                  g_w5500_tcp_init_ok = 0u;
+                  g_w5500_tcp_listen_ok = 0u;
+                  const HAL_StatusTypeDef disconnect_status =
+                    w5500_socket0_execute_command(
+                      W5500_SOCKET0_DISCON_COMMAND);
+                  g_w5500_socket0_spi_status =
+                    (int32_t)disconnect_status;
+
+                  if (disconnect_status == HAL_OK)
+                  {
+                    graceful_disconnect_pending = 1u;
+                    socket_state_enter_tick = osKernelGetTickCount();
+                  }
+                  else
+                  {
+                    tcp_lifecycle_restart_pending = 1u;
+                    next_tcp_restart_tick =
+                      osKernelGetTickCount() + tcp_recovery_retry_ticks;
+                  }
+                }
+                else if ((uint32_t)(
+                           current_tick - socket_state_enter_tick) >=
+                         tcp_transient_timeout_ticks)
+                {
+                  tcp_lifecycle_restart_pending = 1u;
+                  next_tcp_restart_tick = current_tick;
+                  graceful_disconnect_pending = 0u;
+                }
+                break;
+
+              case W5500_SOCKET0_STATUS_CLOSED:
+                if (w5500_start_tcp_server() == HAL_OK)
+                {
+                  graceful_disconnect_pending = 0u;
+                  socket_state_initialized = 1u;
+                  previous_socket_status = W5500_SOCKET0_STATUS_LISTEN;
+                  socket_state_enter_tick = osKernelGetTickCount();
+                  w5500_tcp_discard_stale_responses();
+                }
+                else
+                {
+                  tcp_lifecycle_restart_pending = 1u;
+                  next_tcp_restart_tick =
+                    osKernelGetTickCount() + tcp_recovery_retry_ticks;
+                  socket_state_initialized = 0u;
+                }
+                break;
+
+              case W5500_SOCKET0_STATUS_INIT:
+                g_w5500_tcp_listen_ok = 0u;
+                if (w5500_listen_tcp_server() == HAL_OK)
+                {
+                  g_w5500_tcp_init_ok = 1u;
+                  graceful_disconnect_pending = 0u;
+                  socket_state_initialized = 1u;
+                  previous_socket_status = W5500_SOCKET0_STATUS_LISTEN;
+                  socket_state_enter_tick = osKernelGetTickCount();
+                  w5500_tcp_discard_stale_responses();
+                }
+                else
+                {
+                  tcp_lifecycle_restart_pending = 1u;
+                  next_tcp_restart_tick =
+                    osKernelGetTickCount() + tcp_recovery_retry_ticks;
+                  socket_state_initialized = 0u;
+                }
+                break;
+
+              case W5500_SOCKET0_STATUS_LISTEN:
+                g_w5500_tcp_init_ok = 1u;
+                g_w5500_tcp_listen_ok = 1u;
+                graceful_disconnect_pending = 0u;
+                break;
+
+              default:
+                if (w5500_tcp_is_transient_state(socket_status) == 0u)
+                {
+                  g_w5500_tcp_init_ok = 0u;
+                  g_w5500_tcp_listen_ok = 0u;
+                  tcp_lifecycle_restart_pending = 1u;
+                  next_tcp_restart_tick = current_tick;
+                  graceful_disconnect_pending = 0u;
+                }
+                else if ((uint32_t)(
+                           current_tick - socket_state_enter_tick) >=
+                         tcp_transient_timeout_ticks)
+                {
+                  g_w5500_tcp_init_ok = 0u;
+                  g_w5500_tcp_listen_ok = 0u;
+                  tcp_lifecycle_restart_pending = 1u;
+                  next_tcp_restart_tick = current_tick;
+                  graceful_disconnect_pending = 0u;
+                }
+                break;
+            }
           }
         }
       }
