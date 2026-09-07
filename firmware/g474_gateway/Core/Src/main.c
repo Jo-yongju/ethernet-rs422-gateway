@@ -57,7 +57,9 @@ typedef enum
 #define RS422_BRINGUP_INTER_TEST_DELAY_MS 20u
 #define RS422_EVENT_RX                     (1UL << 0)
 #define RS422_EVENT_TX_DONE                (1UL << 1)
-#define RS422_EVENT_MASK                   (RS422_EVENT_RX | RS422_EVENT_TX_DONE)
+#define RS422_EVENT_CMD_READY              (1UL << 2)
+#define RS422_EVENT_MASK                   (RS422_EVENT_RX | RS422_EVENT_TX_DONE | \
+                                            RS422_EVENT_CMD_READY)
 #define RS422_RX_RING_CAPACITY             512u
 #define RS422_RX_RING_MASK                 (RS422_RX_RING_CAPACITY - 1u)
 #define RS422_CMD_QUEUE_DEPTH              8u
@@ -148,6 +150,10 @@ typedef enum
 #define W5500_UDP_SEND_TIMEOUT_MS          1000u
 #define W5500_UDP_IO_POLL_MS               10u
 #define W5500_UDP_SPI_CHUNK_SIZE           64u
+/* Day 8 forwards only F429 telemetry; retain the Day 6 generator disabled. */
+#define W5500_UDP_LOCAL_TELEMETRY_ENABLED  0u
+/* F429 produces every 100 ms; two sends clear one-cycle scheduling backlog. */
+#define UDP_TELEMETRY_DRAIN_LIMIT          2u
 
 /* USER CODE END PD */
 
@@ -204,6 +210,22 @@ static volatile uint32_t g_rs422_tx_complete_count = 0u;
 static volatile uint32_t g_rs422_tx_busy_count = 0u;
 static volatile uint32_t g_rs422_tx_error_count = 0u;
 static volatile uint32_t g_rs422_tx_timeout_count = 0u;
+static volatile uint32_t g_rs422_cmd_enqueue_success_count = 0u;
+static volatile uint32_t g_rs422_cmd_enqueue_fail_count = 0u;
+static volatile uint32_t g_rs422_cmd_dequeue_count = 0u;
+static volatile uint32_t g_rs422_forwarded_pong_rx_count = 0u;
+static volatile uint32_t g_tcp_response_enqueue_success_count = 0u;
+static volatile uint32_t g_tcp_response_enqueue_fail_count = 0u;
+static volatile uint32_t g_tcp_response_dequeue_count = 0u;
+static volatile uint32_t g_rs422_telemetry_rx_count = 0u;
+static volatile uint32_t g_udp_telemetry_enqueue_success_count = 0u;
+static volatile uint32_t g_udp_telemetry_enqueue_fail_count = 0u;
+static volatile uint32_t g_udp_telemetry_dequeue_count = 0u;
+static volatile uint32_t g_rs422_telemetry_forwarding_enabled = 0u;
+static volatile uint32_t g_rs422_tcp_ping_pending = 0u;
+static volatile uint16_t g_rs422_tcp_ping_pending_seq = 0u;
+static volatile uint8_t g_rs422_last_tx_msg_id = 0u;
+static volatile uint16_t g_rs422_last_tx_seq = 0u;
 static volatile uint32_t g_rs422_last_valid_frame_tick = 0u;
 static volatile uint32_t g_rs422_has_valid_frame = 0u;
 static volatile rs422_comm_state_t g_rs422_comm_state = COMM_INIT;
@@ -250,6 +272,7 @@ static volatile uint32_t g_w5500_tcp_ping_count = 0u;
 static volatile uint32_t g_w5500_tcp_pong_count = 0u;
 static volatile uint8_t g_w5500_tcp_last_rx_msg_id = 0u;
 static volatile uint16_t g_w5500_tcp_last_rx_seq = 0u;
+static volatile uint8_t g_w5500_tcp_last_tx_msg_id = 0u;
 static volatile uint16_t g_w5500_tcp_last_tx_seq = 0u;
 static volatile uint32_t g_w5500_tcp_rx_error_count = 0u;
 static volatile uint32_t g_w5500_tcp_tx_error_count = 0u;
@@ -277,6 +300,7 @@ static const osMessageQueueAttr_t udp_telemetry_queue_attributes = {
   .name = "udp_telemetry_queue"
 };
 static protocol_packet_t g_rs422_ping_packet;
+static protocol_packet_t g_rs422_command_packet;
 static protocol_packet_t g_rs422_received_packet;
 static stream_parser_t g_rs422_parser;
 static uint8_t g_rs422_tx_frame[PROTOCOL_MAX_FRAME_SIZE];
@@ -294,6 +318,7 @@ static const uint8_t g_w5500_udp_destination_ip[4] = {
   192u, 168u, 77u, 1u
 };
 static protocol_packet_t g_udp_telemetry_packet;
+static protocol_packet_t g_udp_forward_packet;
 static uint8_t g_w5500_udp_tx_frame[PROTOCOL_MAX_FRAME_SIZE];
 static uint8_t g_w5500_udp_spi_discard[W5500_UDP_SPI_CHUNK_SIZE];
 
@@ -322,6 +347,7 @@ static int32_t rs422_wait_for_tx_complete(
   uint32_t *matching_pong_received);
 static int32_t rs422_ping_bringup_test(uint16_t sequence);
 static int32_t rs422_ping_bringup_run(void);
+static int32_t rs422_forward_packet(const protocol_packet_t *packet);
 static void w5500_hardware_reset(void);
 static HAL_StatusTypeDef w5500_read_version(uint8_t *version);
 static HAL_StatusTypeDef w5500_read_common_register(uint16_t address, uint8_t *value);
@@ -368,6 +394,7 @@ static HAL_StatusTypeDef w5500_tcp_wait_for_send_result(void);
 static HAL_StatusTypeDef w5500_tcp_send_frame(
   const uint8_t *frame,
   uint16_t frame_length);
+static void w5500_tcp_send_response_packet(const protocol_packet_t *packet);
 static void w5500_tcp_handle_valid_frame(void);
 static HAL_StatusTypeDef w5500_tcp_process_rx(void);
 static HAL_StatusTypeDef w5500_wait_for_socket0_status(
@@ -408,6 +435,8 @@ static HAL_StatusTypeDef w5500_udp_send_frame(
 static HAL_StatusTypeDef w5500_start_udp_socket(void);
 static uint32_t w5500_kernel_uptime_ms(void);
 static void w5500_udp_send_telemetry(void);
+static HAL_StatusTypeDef w5500_udp_forward_packet(
+  const protocol_packet_t *packet);
 
 /* USER CODE END PFP */
 
@@ -1017,6 +1046,44 @@ static HAL_StatusTypeDef w5500_tcp_send_frame(
   return w5500_tcp_wait_for_send_result();
 }
 
+static void w5500_tcp_send_response_packet(const protocol_packet_t *packet)
+{
+  size_t frame_length = 0u;
+
+  if ((packet == NULL) ||
+      (protocol_encode(
+         packet,
+         g_w5500_tcp_tx_frame,
+         sizeof(g_w5500_tcp_tx_frame),
+         &frame_length) != PROTO_OK) ||
+      (frame_length == 0u) ||
+      (frame_length > UINT16_MAX))
+  {
+    g_w5500_tcp_last_tx_status = (int32_t)HAL_ERROR;
+    g_w5500_tcp_tx_error_count++;
+    return;
+  }
+
+  const HAL_StatusTypeDef status = w5500_tcp_send_frame(
+    g_w5500_tcp_tx_frame,
+    (uint16_t)frame_length);
+  g_w5500_tcp_last_tx_status = (int32_t)status;
+
+  if (status != HAL_OK)
+  {
+    g_w5500_tcp_tx_error_count++;
+    return;
+  }
+
+  g_w5500_tcp_tx_bytes += (uint32_t)frame_length;
+  g_w5500_tcp_last_tx_msg_id = packet->msg_id;
+  g_w5500_tcp_last_tx_seq = packet->seq;
+  if (packet->msg_id == MSG_PONG)
+  {
+    g_w5500_tcp_pong_count++;
+  }
+}
+
 static void w5500_tcp_handle_valid_frame(void)
 {
   g_w5500_tcp_valid_frame_count++;
@@ -1029,37 +1096,24 @@ static void w5500_tcp_handle_valid_frame(void)
   }
 
   g_w5500_tcp_ping_count++;
-  g_tcp_pong_packet.version = PROTOCOL_VERSION;
-  g_tcp_pong_packet.msg_id = MSG_PONG;
-  g_tcp_pong_packet.seq = g_tcp_received_packet.seq;
-  g_tcp_pong_packet.length = 0u;
 
-  size_t encoded_length = 0u;
-  const protocol_result_t encode_status = protocol_encode(
-    &g_tcp_pong_packet,
-    g_w5500_tcp_tx_frame,
-    sizeof(g_w5500_tcp_tx_frame),
-    &encoded_length);
-  if ((encode_status != PROTO_OK) || (encoded_length == 0u) ||
-      (encoded_length > UINT16_MAX))
+  if ((rs422_cmd_queue != NULL) &&
+      (osMessageQueuePut(
+        rs422_cmd_queue,
+        &g_tcp_received_packet,
+        0u,
+        0u) == osOK))
   {
-    g_w5500_tcp_last_tx_status = (int32_t)encode_status;
-    g_w5500_tcp_tx_error_count++;
-    return;
-  }
+    g_rs422_cmd_enqueue_success_count++;
 
-  const HAL_StatusTypeDef send_status = w5500_tcp_send_frame(
-    g_w5500_tcp_tx_frame, (uint16_t)encoded_length);
-  g_w5500_tcp_last_tx_status = (int32_t)send_status;
-  if (send_status == HAL_OK)
-  {
-    g_w5500_tcp_tx_bytes += (uint32_t)encoded_length;
-    g_w5500_tcp_pong_count++;
-    g_w5500_tcp_last_tx_seq = g_tcp_pong_packet.seq;
+    if (RS422TaskHandle != NULL)
+    {
+      (void)osThreadFlagsSet(RS422TaskHandle, RS422_EVENT_CMD_READY);
+    }
   }
   else
   {
-    g_w5500_tcp_tx_error_count++;
+    g_rs422_cmd_enqueue_fail_count++;
   }
 }
 
@@ -1741,6 +1795,50 @@ static void w5500_udp_send_telemetry(void)
   }
 }
 
+static HAL_StatusTypeDef w5500_udp_forward_packet(
+  const protocol_packet_t *packet)
+{
+  size_t encoded_length = 0u;
+
+  if ((packet == NULL) || (packet->msg_id != MSG_TELEMETRY))
+  {
+    g_w5500_udp_last_tx_status = (int32_t)HAL_ERROR;
+    g_w5500_udp_tx_error_count++;
+    return HAL_ERROR;
+  }
+
+  const protocol_result_t encode_status = protocol_encode(
+    packet,
+    g_w5500_udp_tx_frame,
+    sizeof(g_w5500_udp_tx_frame),
+    &encoded_length);
+  if ((encode_status != PROTO_OK) || (encoded_length == 0u) ||
+      (encoded_length > UINT16_MAX))
+  {
+    g_w5500_udp_last_tx_status = (int32_t)encode_status;
+    g_w5500_udp_tx_error_count++;
+    return HAL_ERROR;
+  }
+
+  const HAL_StatusTypeDef send_status = w5500_udp_send_frame(
+    g_w5500_udp_tx_frame, (uint16_t)encoded_length);
+  g_w5500_udp_last_tx_status = (int32_t)send_status;
+  g_w5500_udp_socket1_spi_status = (int32_t)send_status;
+
+  if (send_status == HAL_OK)
+  {
+    g_w5500_udp_tx_packet_count++;
+    g_w5500_udp_tx_bytes += (uint32_t)encoded_length;
+    g_w5500_udp_last_tx_seq = packet->seq;
+  }
+  else
+  {
+    g_w5500_udp_tx_error_count++;
+  }
+
+  return send_status;
+}
+
 static void rs422_rx_ring_push_from_isr(uint8_t byte)
 {
   const uint16_t head = g_rs422_rx_head;
@@ -1809,11 +1907,55 @@ static uint32_t rs422_process_rx_buffer(
       __DMB();
       g_rs422_has_valid_frame = 1u;
 
+      if (g_rs422_received_packet.msg_id == MSG_TELEMETRY)
+      {
+        g_rs422_telemetry_rx_count++;
+
+        if (g_rs422_telemetry_forwarding_enabled != 0u)
+        {
+          if ((udp_telemetry_queue != NULL) &&
+              (osMessageQueuePut(
+                 udp_telemetry_queue,
+                 &g_rs422_received_packet,
+                 0u,
+                 0u) == osOK))
+          {
+            g_udp_telemetry_enqueue_success_count++;
+          }
+          else
+          {
+            g_udp_telemetry_enqueue_fail_count++;
+          }
+        }
+      }
+
       if ((match_pong != 0u) &&
           (g_rs422_received_packet.msg_id == MSG_PONG) &&
           (g_rs422_received_packet.seq == expected_pong_sequence))
       {
         matching_pong_received = 1u;
+      }
+
+      if ((g_rs422_received_packet.msg_id == MSG_PONG) &&
+          (g_rs422_tcp_ping_pending != 0u) &&
+          (g_rs422_received_packet.seq == g_rs422_tcp_ping_pending_seq))
+      {
+        g_rs422_tcp_ping_pending = 0u;
+        g_rs422_forwarded_pong_rx_count++;
+
+        if ((tcp_response_queue != NULL) &&
+            (osMessageQueuePut(
+               tcp_response_queue,
+               &g_rs422_received_packet,
+               0u,
+               0u) == osOK))
+        {
+          g_tcp_response_enqueue_success_count++;
+        }
+        else
+        {
+          g_tcp_response_enqueue_fail_count++;
+        }
       }
     }
   }
@@ -2062,6 +2204,91 @@ static int32_t rs422_ping_bringup_run(void)
   }
 
   return last_failure;
+}
+
+static int32_t rs422_forward_packet(const protocol_packet_t *packet)
+{
+  size_t tx_frame_length = 0u;
+  uint32_t matching_pong_received = 0u;
+
+  if (packet == NULL)
+  {
+    g_rs422_tx_error_count++;
+    return RS422_PING_TEST_ENCODE_FAILURE;
+  }
+
+  if (g_rs422_tx_busy != 0u)
+  {
+    g_rs422_tx_busy_count++;
+    return RS422_PING_TEST_TX_FAILURE;
+  }
+
+  if ((protocol_encode(
+         packet,
+         g_rs422_tx_frame,
+         sizeof(g_rs422_tx_frame),
+         &tx_frame_length) != PROTO_OK) ||
+      (tx_frame_length == 0u) ||
+      (tx_frame_length > UINT16_MAX))
+  {
+    g_rs422_tx_error_count++;
+    return RS422_PING_TEST_ENCODE_FAILURE;
+  }
+
+  if ((osThreadFlagsClear(RS422_EVENT_TX_DONE) & osFlagsError) != 0u)
+  {
+    g_rs422_tx_error_count++;
+    return RS422_PING_TEST_TX_FAILURE;
+  }
+
+  if (packet->msg_id == MSG_PING)
+  {
+    g_rs422_tcp_ping_pending_seq = packet->seq;
+    __DMB();
+    g_rs422_tcp_ping_pending = 1u;
+  }
+
+  g_rs422_tx_busy = 1u;
+  const HAL_StatusTypeDef tx_status = HAL_UART_Transmit_IT(
+    &huart4,
+    g_rs422_tx_frame,
+    (uint16_t)tx_frame_length);
+
+  if (tx_status != HAL_OK)
+  {
+    g_rs422_tx_busy = 0u;
+    if (packet->msg_id == MSG_PING)
+    {
+      g_rs422_tcp_ping_pending = 0u;
+    }
+
+    if (tx_status == HAL_BUSY)
+    {
+      g_rs422_tx_busy_count++;
+    }
+    else
+    {
+      g_rs422_tx_error_count++;
+    }
+
+    return RS422_PING_TEST_TX_FAILURE;
+  }
+
+  g_rs422_last_tx_msg_id = packet->msg_id;
+  g_rs422_last_tx_seq = packet->seq;
+
+  if (rs422_wait_for_tx_complete(
+        packet->seq,
+        &matching_pong_received) != RS422_PING_TEST_PASS)
+  {
+    if (packet->msg_id == MSG_PING)
+    {
+      g_rs422_tcp_ping_pending = 0u;
+    }
+    return RS422_PING_TEST_TX_FAILURE;
+  }
+
+  return RS422_PING_TEST_PASS;
 }
 
 /* USER CODE END 0 */
@@ -2474,6 +2701,18 @@ void StartRS422Task(void *argument)
   g_rs422_tx_busy_count = 0u;
   g_rs422_tx_error_count = 0u;
   g_rs422_tx_timeout_count = 0u;
+  g_rs422_cmd_dequeue_count = 0u;
+  g_rs422_forwarded_pong_rx_count = 0u;
+  g_tcp_response_enqueue_success_count = 0u;
+  g_tcp_response_enqueue_fail_count = 0u;
+  g_rs422_telemetry_rx_count = 0u;
+  g_udp_telemetry_enqueue_success_count = 0u;
+  g_udp_telemetry_enqueue_fail_count = 0u;
+  g_rs422_telemetry_forwarding_enabled = 0u;
+  g_rs422_tcp_ping_pending = 0u;
+  g_rs422_tcp_ping_pending_seq = 0u;
+  g_rs422_last_tx_msg_id = 0u;
+  g_rs422_last_tx_seq = 0u;
   g_rs422_last_valid_frame_tick = 0u;
   g_rs422_has_valid_frame = 0u;
   stream_parser_init(&g_rs422_parser);
@@ -2488,10 +2727,24 @@ void StartRS422Task(void *argument)
     g_rs422_ping_test_result = RS422_PING_TEST_RX_FAILURE;
   }
 
+  g_rs422_telemetry_forwarding_enabled = 1u;
+
   /* Infinite loop */
   for(;;)
   {
     (void)rs422_process_rx_buffer(0u, 0u);
+
+    while ((rs422_cmd_queue != NULL) &&
+           (osMessageQueueGet(
+              rs422_cmd_queue,
+              &g_rs422_command_packet,
+              NULL,
+              0u) == osOK))
+    {
+      g_rs422_cmd_dequeue_count++;
+      (void)rs422_forward_packet(&g_rs422_command_packet);
+      (void)rs422_process_rx_buffer(0u, 0u);
+    }
 
     const uint32_t flags = osThreadFlagsWait(
       RS422_EVENT_MASK,
@@ -2537,11 +2790,15 @@ void StartEthernetTask(void *argument)
   g_w5500_tcp_pong_count = 0u;
   g_w5500_tcp_last_rx_msg_id = 0u;
   g_w5500_tcp_last_rx_seq = 0u;
+  g_w5500_tcp_last_tx_msg_id = 0u;
   g_w5500_tcp_last_tx_seq = 0u;
   g_w5500_tcp_rx_error_count = 0u;
   g_w5500_tcp_tx_error_count = 0u;
   g_w5500_tcp_last_rx_status = -1;
   g_w5500_tcp_last_tx_status = -1;
+  g_rs422_cmd_enqueue_success_count = 0u;
+  g_rs422_cmd_enqueue_fail_count = 0u;
+  g_tcp_response_dequeue_count = 0u;
   g_w5500_udp_open_ok = 0u;
   g_w5500_udp_socket1_status = W5500_SOCKET1_STATUS_CLOSED;
   g_w5500_udp_socket1_spi_status = -1;
@@ -2551,6 +2808,7 @@ void StartEthernetTask(void *argument)
   g_w5500_udp_last_tx_seq = 0u;
   g_w5500_udp_last_tx_status = -1;
   g_w5500_udp_next_seq = 1u;
+  g_udp_telemetry_dequeue_count = 0u;
   stream_parser_init(&g_tcp_parser);
   for (uint16_t index = 0u; index < W5500_GAR_LENGTH; index++)
   {
@@ -2641,6 +2899,17 @@ void StartEthernetTask(void *argument)
           {
             g_w5500_tcp_rx_error_count++;
           }
+
+          if ((tcp_response_queue != NULL) &&
+              (osMessageQueueGet(
+                 tcp_response_queue,
+                 &g_tcp_pong_packet,
+                 NULL,
+                 0u) == osOK))
+          {
+            g_tcp_response_dequeue_count++;
+            w5500_tcp_send_response_packet(&g_tcp_pong_packet);
+          }
         }
       }
     }
@@ -2659,7 +2928,31 @@ void StartEthernetTask(void *argument)
         if ((udp_socket_status == W5500_SOCKET1_STATUS_UDP) &&
             (g_w5500_link_up != 0u))
         {
-          w5500_udp_send_telemetry();
+          if (W5500_UDP_LOCAL_TELEMETRY_ENABLED != 0u)
+          {
+            w5500_udp_send_telemetry();
+          }
+
+          for (uint32_t drain_index = 0u;
+               drain_index < UDP_TELEMETRY_DRAIN_LIMIT;
+               drain_index++)
+          {
+            if ((udp_telemetry_queue == NULL) ||
+                (osMessageQueueGet(
+                   udp_telemetry_queue,
+                   &g_udp_forward_packet,
+                   NULL,
+                   0u) != osOK))
+            {
+              break;
+            }
+
+            g_udp_telemetry_dequeue_count++;
+            if (w5500_udp_forward_packet(&g_udp_forward_packet) != HAL_OK)
+            {
+              break;
+            }
+          }
         }
       }
     }
