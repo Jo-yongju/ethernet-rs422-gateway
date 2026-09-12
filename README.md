@@ -35,6 +35,7 @@ TCP Command/Response와 UDP Telemetry를 RS-422 Remote Node로 중계하고, 통
 | F429 Remote Node | **30 / 30 PASS** |
 | RS-422 PING/PONG | **100 / 100 PASS** |
 | TCP E2E | **300 / 300, Timeout 0** |
+| TCP RTT Endurance | **20,000 / 20,000, Timeout 0** |
 | TCP RTT | **Avg 5.223 ms** |
 | TCP Jitter | **Avg 0.545 ms** |
 | UDP | **1000 / 1000, Loss 0.00%** |
@@ -260,6 +261,21 @@ RTT Max      : 8.388 ms
 Jitter Avg   : 0.545 ms
 ```
 
+### 20,000회 연속 RTT 시험
+
+1 ms data-plane firmware에서 동일 TCP connection으로 Protocol V1 PING/PONG을 20,000회 연속 수행했다.
+
+| 항목 | 결과 |
+| --- | ---: |
+| TX / RX | 20,000 / 20,000 |
+| Timeout | 0 |
+| RTT Min | 3.477 ms |
+| RTT Avg | 4.670 ms |
+| RTT Max | 7.681 ms |
+| Jitter | 0.339 ms |
+
+Jitter는 연속 RTT 표본 간 절대 차이의 평균이다. 전체 측정값은 [`results/day10/tcp_rtt_20000_1ms.csv`](results/day10/tcp_rtt_20000_1ms.csv)에 보존했다.
+
 ---
 
 ## Fault Detection / Recovery
@@ -343,6 +359,7 @@ TX Timeout     : 0
 | F429 Remote Node | `30 / 30 PASS` |
 | RS-422 PING/PONG | `100 / 100 PASS` |
 | TCP E2E | `300 / 300`, Timeout `0` |
+| TCP RTT Endurance | `20,000 / 20,000`, Timeout `0`, Avg `4.670 ms` |
 | TCP RTT | Min `3.728 ms` / Avg `5.223 ms` / Max `8.388 ms` |
 | TCP Jitter | Avg `0.545 ms` |
 | UDP | `1000 / 1000`, Loss `0.00%` |
