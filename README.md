@@ -14,6 +14,8 @@ Ethernet 기반 상위 시스템과 RS-422 기반 임베디드 장치 사이를 
 
 TCP Command/Response와 UDP Telemetry를 RS-422 Remote Node로 중계하고, 통신 단절·Remote MCU Reset·Ethernet 재연결 상황에서도 Gateway를 Reset하지 않고 정상 통신으로 복귀하도록 구현했다.
 
+▶ [Ethernet–RS-422 Gateway 동작 영상](https://youtu.be/SSujVMPinWs)
+
 ---
 
 ## 기능
