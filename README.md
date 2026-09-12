@@ -5,6 +5,11 @@
 ![Ethernet](https://img.shields.io/badge/Ethernet-W5500-2563EB)
 ![RS-422](https://img.shields.io/badge/Serial-RS--422-4B5563)
 
+<p align="center">
+  <img src="assets/gateway_overview.jpg" width="820" alt="Ethernet RS-422 Gateway hardware setup">
+</p>
+<p align="center"><sub>PC–W5500–STM32G474 Gateway–2 m RS-422–STM32F429 Remote Node 전체 실험 구성</sub></p>
+
 Ethernet 기반 상위 시스템과 RS-422 기반 임베디드 장치 사이를 연결하는 STM32/FreeRTOS 통신 Gateway이다.
 
 TCP Command/Response와 UDP Telemetry를 RS-422 Remote Node로 중계하고, 통신 단절·Remote MCU Reset·Ethernet 재연결 상황에서도 Gateway를 Reset하지 않고 정상 통신으로 복귀하도록 구현했다.
@@ -351,6 +356,12 @@ TX Timeout     : 0
 ---
 
 ## Hardware
+
+<p align="center">
+  <img src="assets/gateway_closeup.jpg" width="49%" alt="STM32G474 gateway close-up">
+  <img src="assets/remote_closeup.png" width="49%" alt="STM32F429 remote node close-up">
+</p>
+<p align="center"><sub>Gateway Node (left) · Remote Node (right)</sub></p>
 
 | 부품 | 역할 |
 | --- | --- |
