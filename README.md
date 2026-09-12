@@ -358,8 +358,8 @@ TX Timeout     : 0
 ## Hardware
 
 <p align="center">
-  <img src="assets/gateway_closeup.jpg" width="49%" alt="STM32G474 gateway close-up">
-  <img src="assets/remote_closeup.png" width="49%" alt="STM32F429 remote node close-up">
+  <img src="assets/gateway_closeup.jpg" height="420" alt="STM32G474 gateway close-up">
+  <img src="assets/remote_closeup.png" height="420" alt="STM32F429 remote node close-up">
 </p>
 <p align="center"><sub>Gateway Node (left) · Remote Node (right)</sub></p>
 
