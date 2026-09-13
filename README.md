@@ -34,7 +34,8 @@ TCP Command/Response와 UDP Telemetry를 RS-422 Remote Node로 중계하고, 통
 | 항목 | 결과 |
 | --- | --- |
 | Protocol / Parser | **17 / 17 PASS** |
-| F429 Remote Node | **30 / 30 PASS** |
+| F429 Remote Node | **13 / 13 PASS** |
+| Host Regression Total | **30 / 30 PASS** |
 | RS-422 PING/PONG | **100 / 100 PASS** |
 | TCP E2E | **300 / 300, Timeout 0** |
 | TCP RTT Endurance | **20,000 / 20,000, Timeout 0** |
@@ -358,7 +359,8 @@ TX Timeout     : 0
 | 시험 | 결과 |
 | --- | --- |
 | Protocol / Parser | `17 / 17 PASS` |
-| F429 Remote Node | `30 / 30 PASS` |
+| F429 Remote Node | `13 / 13 PASS` |
+| Host Regression Total | `30 / 30 PASS` |
 | RS-422 PING/PONG | `100 / 100 PASS` |
 | TCP E2E | `300 / 300`, Timeout `0` |
 | TCP RTT Endurance | `20,000 / 20,000`, Timeout `0`, Avg `4.670 ms` |
@@ -405,17 +407,15 @@ TX Timeout     : 0
 ## Repository
 
 ```text
-Core/
-Drivers/
-Middlewares/
+assets/
 common/
+docs/
 firmware/
 ├─ g474_gateway/
 └─ f429_remote_node/
-docs/
-├─ protocol_v1.md
-├─ pre_g474_test_plan.md
-└─ test_log_format.md
+host/
+results/
+tests/
 ```
 
 ### Documentation
